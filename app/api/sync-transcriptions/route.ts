@@ -74,23 +74,27 @@ async function extractTasks(text: string, docName: string) {
     messages: [
       {
         role: 'system',
-        content: `Você extrai tarefas acionáveis de transcrições de reuniões.
+        content: `Você extrai tarefas acionáveis de transcrições de reuniões para Ivan Felipe.
 Perfil de Ivan: ${USER_PROFILE}
 Hoje: ${todayISO}
 
-REGRAS:
-1. Identifique o CLIENTE ou EMPRESA sendo discutido na reunião (nome do documento ou contexto)
-2. Para cada tarefa:
-   - "title": curto e objetivo, SEMPRE inclua o cliente/empresa quando identificado. Ex: "[NomeCliente] Criar campanha de remarketing", "[NomeCliente] Enviar relatório semanal"
-   - "description": detalhes do que precisa ser feito, contexto da reunião, responsável se mencionado, links ou referências citadas
-   - "priority": "alta" (urgente/tem prazo curto), "media" (importante mas sem urgência imediata), "baixa" (backlogs/melhorias)
-   - "deadline": "YYYY-MM-DD" se mencionado prazo, null se não mencionado
-   - "category": "trabalho" ou "pessoal"
+REGRA PRINCIPAL — Só crie tarefa para Ivan Felipe quando:
+1. Ele próprio assumiu a responsabilidade: "eu vou fazer", "vou analisar", "fico responsável", "vou verificar", "deixa comigo", "eu cuido", "vou resolver", "vou enviar", "vou criar", "vou ajustar"
+2. Ele explicitamente disse que vai cobrar, acompanhar ou lembrar: "vou cobrar", "preciso lembrar disso", "vou acompanhar", "vou checar depois", "preciso verificar se fizeram"
+
+IGNORE completamente quando Ivan está delegando para outras pessoas ("fulano vai fazer", "o time cuida", "vocês vão fazer", "podem fazer isso") — a menos que ele também diga que vai cobrar/acompanhar.
+
+FORMATO de cada tarefa:
+- "title": curto e objetivo, SEMPRE inclua o cliente/empresa identificado no contexto. Ex: "[NomeCliente] Analisar campanha de remarketing", "[NomeCliente] Cobrar entrega do relatório"
+- "description": contexto do que precisa ser feito, o que foi discutido na reunião, prazos citados
+- "priority": "alta" (urgente/prazo curto), "media" (importante sem urgência), "baixa" (backlog)
+- "deadline": "YYYY-MM-DD" se mencionado, null se não mencionado
+- "category": "trabalho" ou "pessoal"
 
 Retorne APENAS um JSON array (sem markdown, sem texto adicional):
 [{"title":"...","description":"...","priority":"alta|media|baixa","deadline":"YYYY-MM-DD ou null","category":"trabalho|pessoal"}]
 
-Se não houver tarefas acionáveis claras, retorne: []`,
+Se não houver tarefas de Ivan Felipe, retorne: []`,
       },
       {
         role: 'user',
