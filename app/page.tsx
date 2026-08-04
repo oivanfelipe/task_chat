@@ -326,7 +326,7 @@ export default function Home() {
       ]
 
       if (data.task) {
-        await supabase.from('tasks').insert({
+        const { error: insertError } = await supabase.from('tasks').insert({
           title: data.task.title,
           description: data.task.description || null,
           priority: data.task.priority,
@@ -334,6 +334,11 @@ export default function Home() {
           category: data.task.category || 'trabalho',
           status: 'pendente',
         })
+        if (insertError) {
+          setMessages(prev => [...prev, { role: 'assistant', content: `❌ Erro ao salvar tarefa: ${insertError.message}` }])
+          setLoading(false)
+          return
+        }
         historyRef.current = []
         setAwaitingPriority(false)
         await loadTasks()
@@ -386,9 +391,9 @@ export default function Home() {
   const pending = byTab.filter(t => t.status !== 'concluida')
   const done = byTab.filter(t => t.status === 'concluida')
   const tabCount = (k: TaskTab) => ({
-    todas: tasks.length,
-    trabalho: tasks.filter(t => t.category === 'trabalho').length,
-    pessoal: tasks.filter(t => t.category === 'pessoal').length,
+    todas: tasks.filter(t => t.status !== 'concluida').length,
+    trabalho: tasks.filter(t => t.category === 'trabalho' && t.status !== 'concluida').length,
+    pessoal: tasks.filter(t => t.category === 'pessoal' && t.status !== 'concluida').length,
   }[k])
 
   // ── Chat Panel ──
