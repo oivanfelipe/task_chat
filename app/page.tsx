@@ -221,7 +221,7 @@ function TaskSheet({ task, onClose, onSave, onDelete }: {
           </section>
 
           {/* Excluir */}
-          <button onClick={() => { onDelete(); onClose() }}
+          <button onClick={() => { if (window.confirm("Excluir esta tarefa?")) { onDelete(); onClose() } }}
             className="w-full bg-white rounded-2xl py-4 text-red-500 text-[15px] font-medium active:opacity-70">
             Excluir Tarefa
           </button>
@@ -580,7 +580,7 @@ export default function Home() {
             ['tasks', 'Tarefas', '✅'],
           ] as [ActiveTab, string, string][]).map(([key, label, icon]) => (
             <button key={key} onClick={() => setActiveTab(key)}
-              className={`flex-1 flex flex-col items-center pt-2 pb-1 gap-0.5 transition-colors ${activeTab === key ? 'text-blue-500' : 'text-gray-400'}`}>
+              className={`relative flex-1 flex flex-col items-center pt-2 pb-1 gap-0.5 transition-colors ${activeTab === key ? 'text-blue-500' : 'text-gray-400'}`}>
               <span className="text-[22px] leading-none">{icon}</span>
               <span className="text-[10px] font-medium tracking-wide">{label}</span>
               {key === 'tasks' && pending.length > 0 && (
