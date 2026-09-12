@@ -166,11 +166,23 @@ export async function POST() {
     const files = await listDocs(lastSyncAt)
     const googleDocs = files.filter(f => f.mimeType === 'application/vnd.google-apps.document')
 
-    const { data: processed } = await supabase.from('processed_docs').select('doc_id')
+    // Docs already fully processed (tasks extracted)
+    const { data: processed } = await supabase.from('processed_docs').select('doc_id, doc_name')
     const processedIds = new Set((processed || []).map((p: { doc_id: string }) => p.doc_id))
+
+    // Docs that already have a call summary
+    const { data: existingSummaries } = await supabase.from('call_summaries').select('doc_id')
+    const summaryIds = new Set((existingSummaries || []).map((s: { doc_id: string }) => s.doc_id))
+
+    // New docs from Drive (need tasks + summary)
     const newDocs = googleDocs.filter(f => !processedIds.has(f.id))
 
-    if (newDocs.length === 0) {
+    // Legacy docs: already processed but missing summary (v1 backfill)
+    const legacyDocs = (processed || []).filter(
+      (p: { doc_id: string; doc_name: string }) => !summaryIds.has(p.doc_id)
+    ) as Array<{ doc_id: string; doc_name: string }>
+
+    if (newDocs.length === 0 && legacyDocs.length === 0) {
       await updateLastSyncAt(syncStartedAt)
       const sinceBR = new Date(lastSyncAt).toLocaleString('pt-BR', {
         day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
@@ -179,6 +191,7 @@ export async function POST() {
         message: `Nenhum documento novo desde ${sinceBR}.`,
         synced: 0,
         tasks_created: 0,
+        summaries_created: 0,
       })
     }
 
@@ -187,8 +200,10 @@ export async function POST() {
     const clients = clientsData || []
 
     let totalTasks = 0
+    let totalSummaries = 0
     const results: Array<{ doc: string; tasks: number }> = []
 
+    // Process new docs (extract tasks + generate summary)
     for (const doc of newDocs) {
       try {
         const text = await exportDocAsText(doc.id)
@@ -230,6 +245,7 @@ export async function POST() {
             meeting_date: callSummary.meeting_date || null,
             action_items_count: tasks.length,
           }, { onConflict: 'doc_id' })
+          totalSummaries++
         }
 
         await supabase.from('processed_docs').insert({
@@ -241,16 +257,46 @@ export async function POST() {
       }
     }
 
+    // Backfill summaries for legacy docs (already processed in v1, no summary yet)
+    for (const doc of legacyDocs) {
+      try {
+        const text = await exportDocAsText(doc.doc_id)
+        if (!text.trim()) continue
+
+        const callSummary = await extractCallSummary(text, doc.doc_name)
+        if (callSummary) {
+          await supabase.from('call_summaries').upsert({
+            doc_id: doc.doc_id,
+            doc_name: doc.doc_name,
+            summary: callSummary.summary || '',
+            participants: callSummary.participants || null,
+            key_points: callSummary.key_points || [],
+            meeting_date: callSummary.meeting_date || null,
+            action_items_count: callSummary.action_items_count || 0,
+          }, { onConflict: 'doc_id' })
+          totalSummaries++
+        }
+      } catch (err) {
+        console.error(`Erro ao gerar resumo de "${doc.doc_name}":`, err)
+      }
+    }
+
     await updateLastSyncAt(syncStartedAt)
 
     const sinceBR = new Date(lastSyncAt).toLocaleString('pt-BR', {
       day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
     })
 
+    const parts = []
+    if (newDocs.length > 0) parts.push(`${newDocs.length} doc(s) novo(s), ${totalTasks} tarefa(s) criada(s)`)
+    if (legacyDocs.length > 0) parts.push(`${legacyDocs.length} resumo(s) gerado(s) de calls anteriores`)
+    const message = parts.length > 0 ? parts.join(' · ') + `. (desde ${sinceBR})` : `Sincronizado. (desde ${sinceBR})`
+
     return NextResponse.json({
-      message: `${newDocs.length} doc(s) processado(s), ${totalTasks} tarefa(s) criada(s). (desde ${sinceBR})`,
+      message,
       synced: newDocs.length,
       tasks_created: totalTasks,
+      summaries_created: totalSummaries,
       details: results,
     })
   } catch (err) {
