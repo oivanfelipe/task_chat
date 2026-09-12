@@ -68,6 +68,23 @@ async function listDocs(since: string) {
   return (data.files || []) as Array<{ id: string; name: string; mimeType: string; modifiedTime: string }>
 }
 
+async function listAllDocs() {
+  const url = new URL('https://www.googleapis.com/drive/v3/files')
+  url.searchParams.set('q', `'${FOLDER_ID}' in parents and trashed=false`)
+  url.searchParams.set('key', GOOGLE_API_KEY)
+  url.searchParams.set('fields', 'files(id,name,mimeType,modifiedTime)')
+  url.searchParams.set('orderBy', 'modifiedTime desc')
+  url.searchParams.set('pageSize', '100')
+
+  const res = await fetch(url.toString())
+  if (!res.ok) {
+    const body = await res.text()
+    throw new Error(`Drive API error: ${res.status} ${body}`)
+  }
+  const data = await res.json()
+  return (data.files || []) as Array<{ id: string; name: string; mimeType: string; modifiedTime: string }>
+}
+
 async function exportDocAsText(fileId: string): Promise<string> {
   const url = new URL(`https://www.googleapis.com/drive/v3/files/${fileId}/export`)
   url.searchParams.set('mimeType', 'text/plain')
@@ -163,32 +180,36 @@ export async function POST() {
 
     const syncStartedAt = new Date().toISOString()
     const lastSyncAt = await getLastSyncAt()
-    const files = await listDocs(lastSyncAt)
-    const googleDocs = files.filter(f => f.mimeType === 'application/vnd.google-apps.document')
 
-    // Docs already fully processed (tasks extracted)
-    const { data: processed } = await supabase.from('processed_docs').select('doc_id, doc_name')
+    // Recent docs (for task extraction — only new/modified since last sync)
+    const recentFiles = await listDocs(lastSyncAt)
+    const recentDocs = recentFiles.filter(f => f.mimeType === 'application/vnd.google-apps.document')
+
+    // All docs in folder (for summary generation — catches old docs never summarized)
+    const allFiles = await listAllDocs()
+    const allDocs = allFiles.filter(f => f.mimeType === 'application/vnd.google-apps.document')
+
+    // Docs already processed for task extraction
+    const { data: processed } = await supabase.from('processed_docs').select('doc_id')
     const processedIds = new Set((processed || []).map((p: { doc_id: string }) => p.doc_id))
 
     // Docs that already have a call summary
     const { data: existingSummaries } = await supabase.from('call_summaries').select('doc_id')
     const summaryIds = new Set((existingSummaries || []).map((s: { doc_id: string }) => s.doc_id))
 
-    // New docs from Drive (need tasks + summary)
-    const newDocs = googleDocs.filter(f => !processedIds.has(f.id))
+    // Docs needing task extraction (recently modified, not yet processed)
+    const docsForTasks = recentDocs.filter(f => !processedIds.has(f.id))
 
-    // Legacy docs: already processed but missing summary (v1 backfill)
-    const legacyDocs = (processed || []).filter(
-      (p: { doc_id: string; doc_name: string }) => !summaryIds.has(p.doc_id)
-    ) as Array<{ doc_id: string; doc_name: string }>
+    // Docs needing summary generation (any doc in folder without a summary)
+    const docsForSummary = allDocs.filter(f => !summaryIds.has(f.id))
 
-    if (newDocs.length === 0 && legacyDocs.length === 0) {
+    if (docsForTasks.length === 0 && docsForSummary.length === 0) {
       await updateLastSyncAt(syncStartedAt)
       const sinceBR = new Date(lastSyncAt).toLocaleString('pt-BR', {
         day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
       })
       return NextResponse.json({
-        message: `Nenhum documento novo desde ${sinceBR}.`,
+        message: `Tudo sincronizado. Nenhuma novidade desde ${sinceBR}.`,
         synced: 0,
         tasks_created: 0,
         summaries_created: 0,
@@ -203,14 +224,15 @@ export async function POST() {
     let totalSummaries = 0
     const results: Array<{ doc: string; tasks: number }> = []
 
-    // Process new docs (extract tasks + generate summary)
-    for (const doc of newDocs) {
+    // Process docs needing full extraction (tasks + summary)
+    for (const doc of docsForTasks) {
       try {
         const text = await exportDocAsText(doc.id)
         if (!text.trim()) {
           await supabase.from('processed_docs').insert({
             doc_id: doc.id, doc_name: doc.name, tasks_extracted: 0,
           })
+          summaryIds.add(doc.id) // mark so we don't re-process below
           continue
         }
 
@@ -246,6 +268,7 @@ export async function POST() {
             action_items_count: tasks.length,
           }, { onConflict: 'doc_id' })
           totalSummaries++
+          summaryIds.add(doc.id)
         }
 
         await supabase.from('processed_docs').insert({
@@ -257,27 +280,28 @@ export async function POST() {
       }
     }
 
-    // Backfill summaries for legacy docs (already processed in v1, no summary yet)
-    for (const doc of legacyDocs) {
+    // Generate summaries for docs not yet summarized (old docs, no task extraction needed)
+    for (const doc of docsForSummary) {
+      if (summaryIds.has(doc.id)) continue // already handled above
       try {
-        const text = await exportDocAsText(doc.doc_id)
+        const text = await exportDocAsText(doc.id)
         if (!text.trim()) continue
 
-        const callSummary = await extractCallSummary(text, doc.doc_name)
+        const callSummary = await extractCallSummary(text, doc.name)
         if (callSummary) {
           await supabase.from('call_summaries').upsert({
-            doc_id: doc.doc_id,
-            doc_name: doc.doc_name,
+            doc_id: doc.id,
+            doc_name: doc.name,
             summary: callSummary.summary || '',
             participants: callSummary.participants || null,
             key_points: callSummary.key_points || [],
             meeting_date: callSummary.meeting_date || null,
-            action_items_count: callSummary.action_items_count || 0,
+            action_items_count: 0,
           }, { onConflict: 'doc_id' })
           totalSummaries++
         }
       } catch (err) {
-        console.error(`Erro ao gerar resumo de "${doc.doc_name}":`, err)
+        console.error(`Erro ao gerar resumo de "${doc.name}":`, err)
       }
     }
 
@@ -288,13 +312,13 @@ export async function POST() {
     })
 
     const parts = []
-    if (newDocs.length > 0) parts.push(`${newDocs.length} doc(s) novo(s), ${totalTasks} tarefa(s) criada(s)`)
-    if (legacyDocs.length > 0) parts.push(`${legacyDocs.length} resumo(s) gerado(s) de calls anteriores`)
+    if (totalTasks > 0) parts.push(`${docsForTasks.length} doc(s) novo(s), ${totalTasks} tarefa(s) criada(s)`)
+    if (totalSummaries > 0) parts.push(`${totalSummaries} resumo(s) de call gerado(s)`)
     const message = parts.length > 0 ? parts.join(' · ') + `. (desde ${sinceBR})` : `Sincronizado. (desde ${sinceBR})`
 
     return NextResponse.json({
       message,
-      synced: newDocs.length,
+      synced: docsForTasks.length,
       tasks_created: totalTasks,
       summaries_created: totalSummaries,
       details: results,
