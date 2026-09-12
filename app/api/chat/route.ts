@@ -1,32 +1,72 @@
 import Groq from 'groq-sdk'
 import { NextRequest, NextResponse } from 'next/server'
+import { createClient } from '@supabase/supabase-js'
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+)
 
-function getSystemPrompt() {
+function normalizeStr(s: string) {
+  return s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim()
+}
+
+function resolveClientId(name: string | null, clients: Array<{ id: string; name: string }>) {
+  if (!name) return null
+  const norm = normalizeStr(name)
+  const exact = clients.find(c => normalizeStr(c.name) === norm)
+  if (exact) return exact.id
+  const contains = clients.find(c => normalizeStr(c.name).includes(norm) || norm.includes(normalizeStr(c.name)))
+  return contains?.id ?? null
+}
+
+function getSystemPrompt(
+  clients: Array<{ name: string; segment: string | null; services: string[]; status: string }>,
+  callSummaries: Array<{ doc_name: string; summary: string; participants: string | null; meeting_date: string | null }>
+) {
   const today = new Date()
   const todayISO = today.toISOString().split('T')[0]
+  const tomorrowISO = new Date(Date.now() + 86400000).toISOString().split('T')[0]
   const todayBR = today.toLocaleDateString('pt-BR', { weekday: 'long', day: '2-digit', month: '2-digit', year: 'numeric' })
+
+  const clientList = clients
+    .filter(c => c.status === 'active')
+    .map(c => {
+      const srv = c.services?.length ? ` (${c.services.join(', ')})` : ''
+      const seg = c.segment ? ` [${c.segment}]` : ''
+      return `- ${c.name}${seg}${srv}`
+    })
+    .join('\n')
+
+  const recentCalls = callSummaries
+    .slice(0, 5)
+    .map(cs =>
+      `- ${cs.doc_name}${cs.meeting_date ? ` (${cs.meeting_date})` : ''}: ${cs.summary}${cs.participants ? ` | Participantes: ${cs.participants}` : ''}`
+    )
+    .join('\n')
 
   return `Você é um assistente de gestão de tarefas para Ivan Felipe (marketing de performance — SEO, tráfego pago, funis, ads).
 Hoje é ${todayBR} (ISO: ${todayISO}).
 
-FLUXO OBRIGATÓRIO ao criar uma tarefa (colete UM dado por vez, nunca pergunte tudo de uma vez):
-1. Usuário descreve a tarefa
-2. Se a tarefa parece PROFISSIONAL e não mencionou cliente/empresa → pergunte: "Para qual cliente é essa tarefa?"
-3. Se não informou prazo → pergunte o prazo
-4. Se não informou prioridade → pergunte a prioridade e inclua exatamente ao final da mensagem: [AWAITING_PRIORITY]
-5. Quando tiver todos os dados → responda APENAS com JSON (sem texto extra):
+CARTEIRA DE CLIENTES ATIVOS:
+${clientList}
 
-{"action":"create_task","title":"[Cliente] Ação objetiva","description":"Detalhes relevantes","priority":"alta|media|baixa","deadline":"YYYY-MM-DD ou null","category":"trabalho|pessoal"}
+${recentCalls ? `CALLS RECENTES:\n${recentCalls}\n\n` : ''}CRIAÇÃO DE TAREFA — regras obrigatórias:
+- Ao receber uma tarefa, crie IMEDIATAMENTE em uma só resposta (ZERO perguntas de acompanhamento)
+- Infira cliente, prioridade e prazo pelo contexto. Se não houver cliente claro, use null
+- Responda APENAS com JSON (sem texto extra, sem markdown):
+
+{"action":"create_task","title":"[NomeCliente] Ação objetiva","description":"Detalhes relevantes","priority":"alta|media|baixa","deadline":"YYYY-MM-DD ou null","category":"trabalho|pessoal","client_name":"NomeCliente ou null"}
 
 REGRAS:
-- title: para trabalho, sempre "[\${Cliente}] \${ação}"
-- priority: exatamente "alta", "media" ou "baixa" (sem acento em media)
-- deadline: "hoje" = ${todayISO}, "amanhã" = próximo dia, "semana que vem" = +7 dias
-- Se a tarefa for claramente pessoal (saúde, família, lazer), pule a pergunta de cliente
-- Se o usuário já informou tudo na primeira mensagem, pule as perguntas e crie direto
-- Fora do fluxo de tarefas, responda normalmente em português, de forma direta`
+- title: para trabalho com cliente, sempre "[NomeCliente] ação"
+- client_name: use EXATAMENTE o nome da lista de clientes acima, ou null se pessoal/sem cliente
+- priority: "alta" (urgente/prazo curto), "media" (importante sem urgência), "baixa" (backlog)
+- deadline: "hoje" = ${todayISO}, "amanhã" = ${tomorrowISO}, interprete semanas/meses relativos corretamente
+- category: "trabalho" para clientes/marketing, "pessoal" para saúde/família/lazer
+
+Fora do fluxo de tarefas (perguntas sobre calls, clientes, situação geral): responda normalmente em português, de forma direta e objetiva.`
 }
 
 export async function POST(req: NextRequest) {
@@ -55,12 +95,20 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Nenhuma mensagem recebida' }, { status: 400 })
     }
 
+    const [clientsRes, callsRes] = await Promise.all([
+      supabase.from('clients').select('id, name, segment, services, status').order('name'),
+      supabase.from('call_summaries').select('doc_name, summary, participants, meeting_date').order('created_at', { ascending: false }).limit(5),
+    ])
+
+    const clients = clientsRes.data || []
+    const callSummaries = callsRes.data || []
+
     const completion = await groq.chat.completions.create({
       model: 'llama-3.3-70b-versatile',
-      temperature: 0.5,
+      temperature: 0.3,
       max_tokens: 600,
       messages: [
-        { role: 'system', content: getSystemPrompt() },
+        { role: 'system', content: getSystemPrompt(clients, callSummaries) },
         ...history,
         { role: 'user', content: userMessage },
       ],
@@ -68,21 +116,20 @@ export async function POST(req: NextRequest) {
 
     let responseText = completion.choices[0].message.content || ''
 
-    // Detecta se está pedindo prioridade via marker
-    const awaitingPriority = responseText.includes('[AWAITING_PRIORITY]')
-    responseText = responseText.replace('[AWAITING_PRIORITY]', '').trim()
-
-    // Detecta JSON de criação de tarefa
     let task = null
     try {
       const jsonMatch = responseText.match(/\{[\s\S]*"action"\s*:\s*"create_task"[\s\S]*\}/)
-      if (jsonMatch) task = JSON.parse(jsonMatch[0])
-    } catch { /* resposta normal */ }
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0])
+        parsed.client_id = resolveClientId(parsed.client_name ?? null, clients)
+        task = parsed
+        responseText = `✅ Tarefa "${task.title}" criada!`
+      }
+    } catch { /* normal response */ }
 
     return NextResponse.json({
-      message: task ? `✅ Tarefa "${task.title}" criada!` : responseText,
+      message: responseText,
       transcription: audio && audio.size > 0 ? userMessage : null,
-      awaitingPriority: task ? false : awaitingPriority,
       task,
     })
   } catch (err) {
