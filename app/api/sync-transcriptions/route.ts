@@ -15,6 +15,21 @@ const USER_PROFILE = `Ivan Felipe — profissional de marketing de performance (
 Tarefas de TRABALHO: campanhas, clientes, ads (Meta/Google/TikTok/LinkedIn), SEO, relatórios, reuniões, ferramentas de marketing, CRO, funil.
 Tarefas PESSOAIS: domésticas, saúde, família, lazer.`
 
+function normalizeStr(s: string) {
+  return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim()
+}
+
+function resolveClientId(title: string, clients: Array<{ id: string; name: string }>) {
+  const bracketMatch = title.match(/^\[([^\]]+)\]/)
+  if (!bracketMatch) return null
+  const name = bracketMatch[1]
+  const norm = normalizeStr(name)
+  const exact = clients.find(c => normalizeStr(c.name) === norm)
+  if (exact) return exact.id
+  const contains = clients.find(c => normalizeStr(c.name).includes(norm) || norm.includes(normalizeStr(c.name)))
+  return contains?.id ?? null
+}
+
 function toRFC3339(ts: string): string {
   return new Date(ts).toISOString().replace(/\.\d{3}Z$/, 'Z')
 }
@@ -25,7 +40,6 @@ async function getLastSyncAt(): Promise<string> {
     .select('value')
     .eq('key', 'last_sync_at')
     .single()
-  // fallback: ontem
   return data?.value || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
 }
 
@@ -39,7 +53,6 @@ async function updateLastSyncAt(ts: string) {
 
 async function listDocs(since: string) {
   const sinceRFC = toRFC3339(since)
-  // URL.searchParams garante encoding correto — sem encodeURIComponent manual
   const url = new URL('https://www.googleapis.com/drive/v3/files')
   url.searchParams.set('q', `'${FOLDER_ID}' in parents and trashed=false and modifiedTime >= '${sinceRFC}'`)
   url.searchParams.set('key', GOOGLE_API_KEY)
@@ -82,13 +95,13 @@ REGRA PRINCIPAL — Só crie tarefa para Ivan Felipe quando:
 1. Ele próprio assumiu a responsabilidade: "eu vou fazer", "vou analisar", "fico responsável", "vou verificar", "deixa comigo", "eu cuido", "vou resolver", "vou enviar", "vou criar", "vou ajustar"
 2. Ele explicitamente disse que vai cobrar, acompanhar ou lembrar: "vou cobrar", "preciso lembrar disso", "vou acompanhar", "vou checar depois", "preciso verificar se fizeram"
 
-IGNORE completamente quando Ivan está delegando para outras pessoas ("fulano vai fazer", "o time cuida", "vocês vão fazer", "podem fazer isso") — a menos que ele também diga que vai cobrar/acompanhar.
+IGNORE completamente quando Ivan está delegando para outras pessoas — a menos que ele também diga que vai cobrar/acompanhar.
 
 FORMATO de cada tarefa:
-- "title": curto e objetivo, SEMPRE inclua o cliente/empresa identificado no contexto. Ex: "[NomeCliente] Analisar campanha de remarketing", "[NomeCliente] Cobrar entrega do relatório"
-- "description": contexto do que precisa ser feito, o que foi discutido na reunião, prazos citados
-- "priority": "alta" (urgente/prazo curto), "media" (importante sem urgência), "baixa" (backlog)
-- "deadline": "YYYY-MM-DD" se mencionado, null se não mencionado
+- "title": curto e objetivo, SEMPRE inclua o cliente/empresa identificado. Ex: "[NomeCliente] Analisar campanha de remarketing"
+- "description": contexto do que precisa ser feito
+- "priority": "alta" (urgente/prazo curto), "media" (importante), "baixa" (backlog)
+- "deadline": "YYYY-MM-DD" se mencionado, null se não
 - "category": "trabalho" ou "pessoal"
 
 Retorne APENAS um JSON array (sem markdown, sem texto adicional):
@@ -108,8 +121,37 @@ Se não houver tarefas de Ivan Felipe, retorne: []`,
     const match = content.match(/\[[\s\S]*\]/)
     return match ? JSON.parse(match[0]) : []
   } catch {
-    console.error('JSON parse error:', content.slice(0, 200))
+    console.error('Tasks JSON parse error:', content.slice(0, 200))
     return []
+  }
+}
+
+async function extractCallSummary(text: string, docName: string) {
+  const completion = await groq.chat.completions.create({
+    model: 'llama-3.3-70b-versatile',
+    temperature: 0.2,
+    max_tokens: 800,
+    messages: [
+      {
+        role: 'system',
+        content: `Você gera resumos estruturados de transcrições de reuniões para Ivan Felipe (marketing de performance).
+Retorne APENAS um JSON (sem markdown, sem texto adicional):
+{"summary":"2-3 frases resumindo o objetivo e resultado da reunião","participants":"nomes dos participantes separados por vírgula, ou null","key_points":["ponto-chave 1","ponto-chave 2","ponto-chave 3"],"meeting_date":"YYYY-MM-DD ou null","action_items_count":0}`,
+      },
+      {
+        role: 'user',
+        content: `Nome do documento: "${docName}"\n\nTranscrição:\n${text.slice(0, 8000)}`,
+      },
+    ],
+  })
+
+  const content = completion.choices[0].message.content || '{}'
+  try {
+    const match = content.match(/\{[\s\S]*\}/)
+    return match ? JSON.parse(match[0]) : null
+  } catch {
+    console.error('Summary JSON parse error:', content.slice(0, 200))
+    return null
   }
 }
 
@@ -124,7 +166,6 @@ export async function POST() {
     const files = await listDocs(lastSyncAt)
     const googleDocs = files.filter(f => f.mimeType === 'application/vnd.google-apps.document')
 
-    // Pega IDs já processados
     const { data: processed } = await supabase.from('processed_docs').select('doc_id')
     const processedIds = new Set((processed || []).map((p: { doc_id: string }) => p.doc_id))
     const newDocs = googleDocs.filter(f => !processedIds.has(f.id))
@@ -141,6 +182,10 @@ export async function POST() {
       })
     }
 
+    // Load clients for client_id resolution
+    const { data: clientsData } = await supabase.from('clients').select('id, name')
+    const clients = clientsData || []
+
     let totalTasks = 0
     const results: Array<{ doc: string; tasks: number }> = []
 
@@ -154,7 +199,10 @@ export async function POST() {
           continue
         }
 
-        const tasks = await extractTasks(text, doc.name)
+        const [tasks, callSummary] = await Promise.all([
+          extractTasks(text, doc.name),
+          extractCallSummary(text, doc.name),
+        ])
 
         if (tasks.length > 0) {
           await supabase.from('tasks').insert(
@@ -166,9 +214,22 @@ export async function POST() {
               deadline: t.deadline || null,
               category: t.category === 'pessoal' ? 'pessoal' : 'trabalho',
               status: 'pendente',
+              client_id: resolveClientId(t.title, clients),
             }))
           )
           totalTasks += tasks.length
+        }
+
+        if (callSummary) {
+          await supabase.from('call_summaries').upsert({
+            doc_id: doc.id,
+            doc_name: doc.name,
+            summary: callSummary.summary || '',
+            participants: callSummary.participants || null,
+            key_points: callSummary.key_points || [],
+            meeting_date: callSummary.meeting_date || null,
+            action_items_count: tasks.length,
+          }, { onConflict: 'doc_id' })
         }
 
         await supabase.from('processed_docs').insert({
