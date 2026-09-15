@@ -1,7 +1,8 @@
 'use client'
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { supabase, type Task, type Client, type CallSummary, type DailyItem } from '@/lib/supabase'
+import { supabase, type Task, type Client, type DailyItem, type ClientMeetingInsight } from '@/lib/supabase'
 
+// ─── Helpers ──────────────────────────────────────────────────
 function applyDeadlineFilter(task: Task, filter: string) {
   const today = new Date(); today.setHours(0, 0, 0, 0)
   const dl = task.deadline ? new Date(task.deadline + 'T00:00:00') : null
@@ -18,20 +19,7 @@ function applyDeadlineFilter(task: Task, filter: string) {
   return true
 }
 
-type Message = { role: 'user' | 'assistant'; content: string }
-type HistoryItem = { role: 'user' | 'assistant'; content: string }
-type ActiveTab = 'tasks' | 'daily' | 'calls' | 'chat'
-type TaskTab = 'todas' | 'trabalho' | 'pessoal'
-
-const P = {
-  alta:  { label: 'Alta',  dot: '#EF4444', dark: '#DC2626', btnCls: 'bg-red-500 text-white',    ringCls: 'ring-red-300' },
-  media: { label: 'Média', dot: '#F97316', dark: '#EA580C', btnCls: 'bg-orange-500 text-white', ringCls: 'ring-orange-300' },
-  baixa: { label: 'Baixa', dot: '#22C55E', dark: '#16A34A', btnCls: 'bg-green-500 text-white',  ringCls: 'ring-green-300' },
-} as const
-
-function todayISO() {
-  return new Date().toISOString().split('T')[0]
-}
+function todayISO() { return new Date().toISOString().split('T')[0] }
 
 function addDays(dateStr: string, days: number) {
   const d = new Date(dateStr + 'T00:00:00')
@@ -74,6 +62,18 @@ function clientNameFromTask(task: Task, clients: Client[]) {
   const m = task.title.match(/^\[([^\]]+)\]/)
   return m ? m[1] : null
 }
+
+// ─── Types & constants ────────────────────────────────────────
+type Message = { role: 'user' | 'assistant'; content: string }
+type HistoryItem = { role: 'user' | 'assistant'; content: string }
+type ActiveTab = 'tasks' | 'daily' | 'meetings' | 'chat'
+type TaskTab = 'todas' | 'trabalho' | 'pessoal'
+
+const P = {
+  alta:  { label: 'Alta',  dot: '#EF4444', dark: '#DC2626', btnCls: 'bg-red-500 text-white',    ringCls: 'ring-red-300' },
+  media: { label: 'Média', dot: '#F97316', dark: '#EA580C', btnCls: 'bg-orange-500 text-white', ringCls: 'ring-orange-300' },
+  baixa: { label: 'Baixa', dot: '#22C55E', dark: '#16A34A', btnCls: 'bg-green-500 text-white',  ringCls: 'ring-green-300' },
+} as const
 
 // ─── TaskCard ─────────────────────────────────────────────────
 function TaskCard({ task, clients, onOpen, onToggle }: {
@@ -121,32 +121,35 @@ function TaskCard({ task, clients, onOpen, onToggle }: {
 
 // ─── TaskSheet ────────────────────────────────────────────────
 function TaskSheet({ task, clients, onClose, onSave, onDelete }: {
-  task: Task; clients: Client[]
+  task: Task | null
+  clients: Client[]
   onClose: () => void
   onSave: (u: Partial<Task>) => Promise<void>
-  onDelete: () => void
+  onDelete?: () => void
 }) {
-  const [title, setTitle] = useState(task.title)
-  const [description, setDescription] = useState(task.description || '')
-  const [priority, setPriority] = useState<Task['priority']>(task.priority)
-  const [deadline, setDeadline] = useState(task.deadline || '')
-  const [category, setCategory] = useState<Task['category']>(task.category)
-  const [notes, setNotes] = useState(task.notes || '')
-  const [clientId, setClientId] = useState(task.client_id || '')
+  const isNew = task === null
+  const [title, setTitle] = useState(task?.title ?? '')
+  const [description, setDescription] = useState(task?.description ?? '')
+  const [priority, setPriority] = useState<Task['priority']>(task?.priority ?? 'media')
+  const [deadline, setDeadline] = useState(task?.deadline ?? '')
+  const [category, setCategory] = useState<Task['category']>(task?.category ?? 'trabalho')
+  const [notes, setNotes] = useState(task?.notes ?? '')
+  const [clientId, setClientId] = useState(task?.client_id ?? '')
   const [aiQ, setAiQ] = useState('')
   const [aiA, setAiA] = useState('')
   const [aiLoading, setAiLoading] = useState(false)
   const [saving, setSaving] = useState(false)
 
   async function save() {
+    if (!title.trim()) return
     setSaving(true)
-    await onSave({ title, description: description || null, priority, deadline: deadline || null, category, notes: notes || null, client_id: clientId || null })
+    await onSave({ title: title.trim(), description: description || null, priority, deadline: deadline || null, category, notes: notes || null, client_id: clientId || null })
     setSaving(false)
     onClose()
   }
 
   async function askAI() {
-    if (!aiQ.trim()) return
+    if (!aiQ.trim() || !task) return
     setAiLoading(true)
     try {
       const fd = new FormData()
@@ -174,8 +177,8 @@ function TaskSheet({ task, clients, onClose, onSave, onDelete }: {
           </div>
           <div className="flex items-center justify-between px-5 py-3">
             <button onClick={onClose} className="text-blue-500 font-medium text-[15px]">Cancelar</button>
-            <span className="font-semibold text-[15px] text-gray-800">Detalhes</span>
-            <button onClick={save} disabled={saving} className="text-blue-500 font-semibold text-[15px] disabled:opacity-40">
+            <span className="font-semibold text-[15px] text-gray-800">{isNew ? 'Nova Tarefa' : 'Detalhes'}</span>
+            <button onClick={save} disabled={saving || !title.trim()} className="text-blue-500 font-semibold text-[15px] disabled:opacity-40">
               {saving ? 'Salvando…' : 'Salvar'}
             </button>
           </div>
@@ -185,7 +188,7 @@ function TaskSheet({ task, clients, onClose, onSave, onDelete }: {
           <section className="bg-white rounded-2xl overflow-hidden divide-y divide-gray-100">
             <div className="px-4 py-3">
               <label className="text-[11px] text-gray-400 uppercase tracking-wider">Título</label>
-              <input className="w-full text-[17px] font-medium mt-1 outline-none bg-transparent" value={title} onChange={e => setTitle(e.target.value)} placeholder="Título da tarefa" />
+              <input className="w-full text-[17px] font-medium mt-1 outline-none bg-transparent" value={title} onChange={e => setTitle(e.target.value)} placeholder="Título da tarefa" autoFocus={isNew} />
             </div>
             <div className="px-4 py-3">
               <label className="text-[11px] text-gray-400 uppercase tracking-wider">Descrição</label>
@@ -195,15 +198,9 @@ function TaskSheet({ task, clients, onClose, onSave, onDelete }: {
 
           <section className="bg-white rounded-2xl px-4 py-3">
             <label className="text-[11px] text-gray-400 uppercase tracking-wider block mb-2.5">Cliente</label>
-            <select
-              className="w-full text-[15px] text-gray-700 outline-none bg-gray-50 rounded-xl px-3 py-2.5"
-              value={clientId}
-              onChange={e => setClientId(e.target.value)}
-            >
+            <select className="w-full text-[15px] text-gray-700 outline-none bg-gray-50 rounded-xl px-3 py-2.5" value={clientId} onChange={e => setClientId(e.target.value)}>
               <option value="">— Sem cliente —</option>
-              {activeClients.map(c => (
-                <option key={c.id} value={c.id}>{c.name}</option>
-              ))}
+              {activeClients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
           </section>
 
@@ -243,24 +240,28 @@ function TaskSheet({ task, clients, onClose, onSave, onDelete }: {
               placeholder="Links, observações, referências…" value={notes} onChange={e => setNotes(e.target.value)} />
           </section>
 
-          <section className="bg-white rounded-2xl px-4 py-3">
-            <label className="text-[11px] text-gray-400 uppercase tracking-wider block mb-2">Perguntar à IA</label>
-            <div className="flex gap-2">
-              <input className="flex-1 text-[15px] bg-gray-50 rounded-xl px-3 py-2 outline-none placeholder:text-gray-300"
-                placeholder="Ex: Quais próximos passos?" value={aiQ} onChange={e => setAiQ(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && askAI()} />
-              <button onClick={askAI} disabled={aiLoading || !aiQ.trim()}
-                className="bg-blue-500 text-white text-[14px] font-semibold px-4 py-2 rounded-xl disabled:opacity-40 whitespace-nowrap">
-                {aiLoading ? '…' : 'Enviar'}
-              </button>
-            </div>
-            {aiA && <div className="mt-3 bg-blue-50 rounded-xl p-3 text-[14px] text-gray-700 leading-relaxed">{aiA}</div>}
-          </section>
+          {!isNew && task && (
+            <section className="bg-white rounded-2xl px-4 py-3">
+              <label className="text-[11px] text-gray-400 uppercase tracking-wider block mb-2">Perguntar à IA</label>
+              <div className="flex gap-2">
+                <input className="flex-1 text-[15px] bg-gray-50 rounded-xl px-3 py-2 outline-none placeholder:text-gray-300"
+                  placeholder="Ex: Quais próximos passos?" value={aiQ} onChange={e => setAiQ(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && askAI()} />
+                <button onClick={askAI} disabled={aiLoading || !aiQ.trim()}
+                  className="bg-blue-500 text-white text-[14px] font-semibold px-4 py-2 rounded-xl disabled:opacity-40 whitespace-nowrap">
+                  {aiLoading ? '…' : 'Enviar'}
+                </button>
+              </div>
+              {aiA && <div className="mt-3 bg-blue-50 rounded-xl p-3 text-[14px] text-gray-700 leading-relaxed">{aiA}</div>}
+            </section>
+          )}
 
-          <button onClick={() => { if (window.confirm('Excluir esta tarefa?')) { onDelete(); onClose() } }}
-            className="w-full bg-white rounded-2xl py-4 text-red-500 text-[15px] font-medium active:opacity-70">
-            Excluir Tarefa
-          </button>
+          {!isNew && onDelete && (
+            <button onClick={() => { if (window.confirm('Excluir esta tarefa?')) { onDelete(); onClose() } }}
+              className="w-full bg-white rounded-2xl py-4 text-red-500 text-[15px] font-medium active:opacity-70">
+              Excluir Tarefa
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -296,8 +297,7 @@ function DailyView({ clients }: { clients: Client[] }) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ date, text: newText.trim(), client_id: newClientId || null }),
     })
-    setNewText('')
-    setNewClientId('')
+    setNewText(''); setNewClientId('')
     await load()
     setAdding(false)
   }
@@ -307,10 +307,7 @@ function DailyView({ clients }: { clients: Client[] }) {
     setItems(prev => prev.map(i => i.id === item.id ? { ...i, done: !i.done } : i))
   }
 
-  function startEdit(item: DailyItem) {
-    setEditingId(item.id)
-    setEditText(item.text)
-  }
+  function startEdit(item: DailyItem) { setEditingId(item.id); setEditText(item.text) }
 
   async function saveEdit(item: DailyItem) {
     const text = editText.trim()
@@ -359,19 +356,15 @@ function DailyView({ clients }: { clients: Client[] }) {
                   )}
                 </button>
                 {editingId === item.id ? (
-                  <input
-                    className="flex-1 text-[15px] outline-none bg-gray-50 rounded-xl px-2 py-1"
-                    autoFocus
-                    value={editText}
-                    onChange={e => setEditText(e.target.value)}
+                  <input className="flex-1 text-[15px] outline-none bg-gray-50 rounded-xl px-2 py-1" autoFocus
+                    value={editText} onChange={e => setEditText(e.target.value)}
                     onBlur={() => saveEdit(item)}
-                    onKeyDown={e => { if (e.key === 'Enter') saveEdit(item); if (e.key === 'Escape') setEditingId(null) }}
-                  />
+                    onKeyDown={e => { if (e.key === 'Enter') saveEdit(item); if (e.key === 'Escape') setEditingId(null) }} />
                 ) : (
-                  <p
-                    onClick={() => !item.done && startEdit(item)}
-                    className={`flex-1 text-[15px] text-gray-800 ${item.done ? 'line-through text-gray-400' : 'cursor-text'}`}
-                  >{item.text}</p>
+                  <p onClick={() => !item.done && startEdit(item)}
+                    className={`flex-1 text-[15px] text-gray-800 ${item.done ? 'line-through text-gray-400' : 'cursor-text'}`}>
+                    {item.text}
+                  </p>
                 )}
               </div>
               {clientName && (
@@ -386,11 +379,8 @@ function DailyView({ clients }: { clients: Client[] }) {
 
       <div className="px-4 py-3 bg-[#F2F2F7] space-y-2">
         {activeClients.length > 0 && (
-          <select
-            className="w-full text-[13px] text-gray-500 bg-white rounded-xl px-3 py-2 outline-none shadow-sm"
-            value={newClientId}
-            onChange={e => setNewClientId(e.target.value)}
-          >
+          <select className="w-full text-[13px] text-gray-500 bg-white rounded-xl px-3 py-2 outline-none shadow-sm"
+            value={newClientId} onChange={e => setNewClientId(e.target.value)}>
             <option value="">Sem cliente</option>
             {activeClients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
@@ -411,18 +401,83 @@ function DailyView({ clients }: { clients: Client[] }) {
   )
 }
 
-// ─── CallsView ────────────────────────────────────────────────
-function CallsView({ summaries, clients }: { summaries: CallSummary[]; clients: Client[] }) {
+// ─── MeetingsView ─────────────────────────────────────────────
+function MeetingsView({ onTasksUpdated }: { onTasksUpdated: () => void }) {
+  const [insights, setInsights] = useState<ClientMeetingInsight[]>([])
+  const [clients, setClients] = useState<Client[]>([])
   const [expanded, setExpanded] = useState<string | null>(null)
+  const [syncing, setSyncing] = useState(false)
+  const [syncMsg, setSyncMsg] = useState<string | null>(null)
+  const [lastSync, setLastSync] = useState<string | null>(null)
+
+  const loadData = useCallback(async () => {
+    const [clientsRes, insightsRes, syncRes] = await Promise.all([
+      supabase.from('clients').select('id, name, status').order('name'),
+      supabase.from('client_meeting_insights')
+        .select('id, client_id, doc_name, meeting_date, key_decisions, open_items, context')
+        .order('meeting_date', { ascending: false })
+        .limit(100),
+      supabase.from('settings').select('value').eq('key', 'last_sync_at').single(),
+    ])
+    if (clientsRes.data) setClients(clientsRes.data as Client[])
+    if (insightsRes.data) setInsights(insightsRes.data as ClientMeetingInsight[])
+    setLastSync(syncRes.data?.value || null)
+  }, [])
+
+  useEffect(() => { loadData() }, [loadData])
+
+  async function handleSync() {
+    setSyncing(true); setSyncMsg(null)
+    try {
+      const res = await fetch('/api/sync-transcriptions', { method: 'POST' })
+      const data = await res.json()
+      setSyncMsg(data.error ? `❌ ${data.error}` : `✅ ${data.message}`)
+      await loadData()
+      onTasksUpdated()
+    } catch { setSyncMsg('❌ Erro ao sincronizar.') }
+    setSyncing(false)
+  }
+
+  // Group by client
+  const byClient: Record<string, ClientMeetingInsight[]> = {}
+  for (const ins of insights) {
+    if (!byClient[ins.client_id]) byClient[ins.client_id] = []
+    byClient[ins.client_id].push(ins)
+  }
+  const clientCount = Object.keys(byClient).length
 
   return (
     <div className="flex flex-col h-full bg-[#F2F2F7]">
       <div className="px-4 pt-4 pb-2">
-        <h1 className="text-[28px] font-bold text-gray-900 tracking-tight">Calls</h1>
-        <p className="text-[13px] text-gray-400 mt-0.5">{summaries.length} reunião{summaries.length !== 1 ? 'ões' : ''} resumida{summaries.length !== 1 ? 's' : ''}</p>
+        <div className="flex items-start justify-between">
+          <div>
+            <h1 className="text-[28px] font-bold text-gray-900 tracking-tight">Reuniões</h1>
+            <p className="text-[13px] text-gray-400 mt-0.5">
+              {clientCount > 0 ? `${clientCount} cliente${clientCount !== 1 ? 's' : ''} com registros` : 'Nenhum resumo ainda'}
+            </p>
+          </div>
+          <button onClick={handleSync} disabled={syncing}
+            className={`mt-1 flex items-center gap-1.5 bg-gray-800 text-white text-[13px] font-medium px-3 py-1.5 rounded-full transition-opacity ${syncing ? 'opacity-60' : ''}`}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" className={syncing ? 'animate-spin' : ''}>
+              <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+            {syncing ? 'Sincronizando…' : 'Sincronizar'}
+          </button>
+        </div>
+        {syncMsg && (
+          <div className={`mt-2 text-[13px] px-3 py-2 rounded-xl ${syncMsg.startsWith('✅') ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-600'}`}>
+            {syncMsg}
+          </div>
+        )}
+        {lastSync && (
+          <p className="text-[11px] text-gray-300 mt-1">
+            Último sync: {new Date(lastSync).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+          </p>
+        )}
       </div>
+
       <div className="flex-1 overflow-y-auto px-4 pb-6 space-y-3 mt-2">
-        {summaries.length === 0 && (
+        {clientCount === 0 && (
           <div className="flex flex-col items-center justify-center py-16 text-gray-300">
             <svg width="48" height="48" viewBox="0 0 24 24" fill="none" className="mb-3 opacity-40">
               <path d="M12 2a3 3 0 0 1 3 3v4a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
@@ -430,56 +485,84 @@ function CallsView({ summaries, clients }: { summaries: CallSummary[]; clients: 
               <line x1="12" y1="17" x2="12" y2="21" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
             </svg>
             <p className="text-[15px]">Nenhum resumo ainda</p>
-            <p className="text-[13px] mt-1">Sincronize reuniões na aba Tarefas</p>
+            <p className="text-[13px] mt-1 text-center px-8">Toque em Sincronizar para processar as transcrições do Google Drive</p>
           </div>
         )}
-        {summaries.map(cs => {
-          const isOpen = expanded === cs.id
-          const callClients = (cs.client_ids || [])
-            .map(id => clients.find(c => c.id === id))
-            .filter(Boolean) as Client[]
+
+        {Object.entries(byClient).map(([clientId, clientInsights]) => {
+          const client = clients.find(c => c.id === clientId)
+          const clientName = client?.name ?? 'Cliente desconhecido'
+          const isOpen = expanded === clientId
+          const latest = clientInsights[0]
+          const totalDecisions = clientInsights.flatMap(i => i.key_decisions).length
+          const totalOpen = clientInsights.flatMap(i => i.open_items).length
+
           return (
-            <div key={cs.id} className="bg-white rounded-2xl px-4 py-4 cursor-pointer" onClick={() => setExpanded(isOpen ? null : cs.id)}>
+            <div key={clientId} className="bg-white rounded-2xl px-4 py-4 cursor-pointer" onClick={() => setExpanded(isOpen ? null : clientId)}>
               <div className="flex items-start justify-between gap-2">
-                <p className="text-[15px] font-semibold text-gray-900 flex-1 leading-snug">{cs.doc_name}</p>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  {cs.meeting_date && (
-                    <span className="text-[11px] text-gray-400">
-                      {new Date(cs.meeting_date + 'T00:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })}
+                <div className="flex-1 min-w-0">
+                  <p className="text-[16px] font-semibold text-gray-900">{clientName}</p>
+                  <p className="text-[12px] text-gray-400 mt-0.5">
+                    {clientInsights.length} reunião{clientInsights.length !== 1 ? 'ões' : ''}
+                    {latest?.meeting_date && ` · última em ${new Date(latest.meeting_date + 'T00:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })}`}
+                  </p>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
+                  {totalDecisions > 0 && (
+                    <span className="text-[11px] bg-blue-50 text-blue-600 px-2 py-0.5 rounded-full font-medium">
+                      {totalDecisions} decisão{totalDecisions !== 1 ? 'ões' : ''}
                     </span>
                   )}
-                  <svg width="7" height="12" viewBox="0 0 7 12" fill="none" className={`transition-transform ${isOpen ? 'rotate-90' : ''}`}>
+                  {totalOpen > 0 && (
+                    <span className="text-[11px] bg-orange-50 text-orange-600 px-2 py-0.5 rounded-full font-medium">
+                      {totalOpen} pendente{totalOpen !== 1 ? 's' : ''}
+                    </span>
+                  )}
+                  <svg width="7" height="12" viewBox="0 0 7 12" fill="none" className={`transition-transform ml-1 ${isOpen ? 'rotate-90' : ''}`}>
                     <path d="M1 1L6 6L1 11" stroke="#C7C7CC" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
                   </svg>
                 </div>
               </div>
-              {callClients.length > 0 && (
-                <div className="flex gap-1.5 flex-wrap mt-1.5">
-                  {callClients.map(c => (
-                    <span key={c.id} className="text-[11px] font-semibold bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-full">{c.name}</span>
-                  ))}
-                </div>
-              )}
-              {cs.participants && (
-                <p className="text-[12px] text-gray-400 mt-1">{cs.participants}</p>
-              )}
-              <p className="text-[13px] text-gray-600 mt-2 leading-relaxed">{cs.summary}</p>
+
               {isOpen && (
-                <div className="mt-3 space-y-2">
-                  {cs.key_points?.length > 0 && (
-                    <ul className="space-y-1">
-                      {cs.key_points.map((kp, i) => (
-                        <li key={i} className="text-[12px] text-gray-500 flex gap-1.5">
-                          <span className="text-gray-300 shrink-0">·</span>{kp}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                  {cs.action_items_count > 0 && (
-                    <p className="text-[11px] text-green-600 font-medium">
-                      {cs.action_items_count} tarefa{cs.action_items_count !== 1 ? 's' : ''} extraída{cs.action_items_count !== 1 ? 's' : ''}
-                    </p>
-                  )}
+                <div className="mt-3 space-y-4">
+                  {clientInsights.map((ins) => (
+                    <div key={ins.id} className="border-t border-gray-100 pt-3">
+                      <p className="text-[13px] font-semibold text-gray-700">
+                        {ins.doc_name}
+                        {ins.meeting_date && (
+                          <span className="font-normal text-gray-400 ml-1.5">
+                            {new Date(ins.meeting_date + 'T00:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit' })}
+                          </span>
+                        )}
+                      </p>
+                      {ins.context && <p className="text-[12px] text-gray-500 mt-1 leading-relaxed">{ins.context}</p>}
+                      {ins.key_decisions.length > 0 && (
+                        <div className="mt-2">
+                          <p className="text-[10px] font-bold text-blue-500 uppercase tracking-widest mb-1">Decisões</p>
+                          <ul className="space-y-0.5">
+                            {ins.key_decisions.map((d, i) => (
+                              <li key={i} className="text-[12px] text-gray-600 flex gap-1.5">
+                                <span className="text-blue-300 shrink-0 mt-0.5">·</span>{d}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {ins.open_items.length > 0 && (
+                        <div className="mt-2">
+                          <p className="text-[10px] font-bold text-orange-500 uppercase tracking-widest mb-1">Pendentes</p>
+                          <ul className="space-y-0.5">
+                            {ins.open_items.map((o, i) => (
+                              <li key={i} className="text-[12px] text-gray-600 flex gap-1.5">
+                                <span className="text-orange-300 shrink-0 mt-0.5">·</span>{o}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
@@ -490,126 +573,20 @@ function CallsView({ summaries, clients }: { summaries: CallSummary[]; clients: 
   )
 }
 
-// ─── Home ─────────────────────────────────────────────────────
-export default function Home() {
-  const [activeTab, setActiveTab] = useState<ActiveTab>('tasks')
-  const [rightTab, setRightTab] = useState<'daily' | 'calls' | 'chat'>('chat')
-  const [taskTab, setTaskTab] = useState<TaskTab>('todas')
-  const [clientFilter, setClientFilter] = useState<string | null>(null)
-  const [filterPriority, setFilterPriority] = useState<'alta'|'media'|'baixa'|null>(null)
-  const [filterDeadline, setFilterDeadline] = useState<'hoje'|'semana'|'mes'|'vencidas'|null>(null)
-
-  const [tasks, setTasks] = useState<Task[]>([])
-  const [clients, setClients] = useState<Client[]>([])
-  const [callSummaries, setCallSummaries] = useState<CallSummary[]>([])
-  const [editingTask, setEditingTask] = useState<Task | null>(null)
-  const [showDone, setShowDone] = useState(false)
-
-  const [quickInput, setQuickInput] = useState('')
-  const [capturing, setCapturing] = useState(false)
-  const [captureRecording, setCaptureRecording] = useState(false)
-
+// ─── ChatView ─────────────────────────────────────────────────
+function ChatView({ onTaskCreated }: { onTaskCreated: () => void }) {
   const [messages, setMessages] = useState<Message[]>([
-    { role: 'assistant', content: 'Olá Ivan! Pode perguntar sobre clientes, calls ou tarefas — ou descreva algo pra criar.' },
+    { role: 'assistant', content: 'Olá Ivan! Pode perguntar sobre clientes, reuniões ou tarefas — ou descreva algo para criar.' },
   ])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [recording, setRecording] = useState(false)
-
-  const [syncing, setSyncing] = useState(false)
-  const [syncMsg, setSyncMsg] = useState<string | null>(null)
-  const [lastSync, setLastSync] = useState<string | null>(null)
-
   const mediaRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
-  const captureMediaRef = useRef<MediaRecorder | null>(null)
-  const captureChunksRef = useRef<Blob[]>([])
   const chatEndRef = useRef<HTMLDivElement>(null)
   const historyRef = useRef<HistoryItem[]>([])
 
-  const loadTasks = useCallback(async () => {
-    const { data } = await supabase.from('tasks').select('*')
-    if (data) setTasks([...data].sort((a, b) => urgencyScore(b) - urgencyScore(a)))
-  }, [])
-
-  const loadClients = useCallback(async () => {
-    const { data } = await supabase.from('clients').select('*').order('status').order('name')
-    if (data) setClients(data)
-  }, [])
-
-  const loadCallSummaries = useCallback(async () => {
-    const { data } = await supabase.from('call_summaries').select('*').order('created_at', { ascending: false })
-    if (data) setCallSummaries(data)
-  }, [])
-
-  const loadLastSync = useCallback(async () => {
-    const { data } = await supabase.from('settings').select('value').eq('key', 'last_sync_at').single()
-    setLastSync(data?.value || null)
-  }, [])
-
-  useEffect(() => {
-    loadTasks(); loadClients(); loadCallSummaries(); loadLastSync()
-  }, [loadTasks, loadClients, loadCallSummaries, loadLastSync])
-
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
-
-  async function handleSync() {
-    setSyncing(true); setSyncMsg(null)
-    try {
-      const res = await fetch('/api/sync-transcriptions', { method: 'POST' })
-      const data = await res.json()
-      setSyncMsg(data.error ? `❌ ${data.error}` : `✅ ${data.message}`)
-      await Promise.all([loadTasks(), loadCallSummaries(), loadLastSync()])
-    } catch { setSyncMsg('❌ Erro ao sincronizar.') }
-    setSyncing(false)
-  }
-
-  async function submitCapture(text?: string, audioBlob?: Blob) {
-    const msg = text ?? quickInput.trim()
-    if (!msg && !audioBlob) return
-    setCapturing(true)
-    setQuickInput('')
-    const fd = new FormData()
-    if (audioBlob) fd.append('audio', audioBlob, 'audio.webm')
-    if (msg) fd.append('text', msg)
-    fd.append('history', JSON.stringify([]))
-    try {
-      const res = await fetch('/api/chat', { method: 'POST', body: fd })
-      const data = await res.json()
-      if (data.task) {
-        await supabase.from('tasks').insert({
-          title: data.task.title,
-          description: data.task.description || null,
-          priority: data.task.priority,
-          deadline: data.task.deadline || null,
-          category: data.task.category || 'trabalho',
-          status: 'pendente',
-          client_id: data.task.client_id || null,
-        })
-        await loadTasks()
-      }
-    } catch { /* silent */ }
-    setCapturing(false)
-  }
-
-  async function toggleCaptureRecording() {
-    if (captureRecording) { captureMediaRef.current?.stop(); return }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' })
-      captureChunksRef.current = []
-      recorder.ondataavailable = e => { if (e.data.size > 0) captureChunksRef.current.push(e.data) }
-      recorder.onstop = () => {
-        stream.getTracks().forEach(t => t.stop())
-        const blob = new Blob(captureChunksRef.current, { type: 'audio/webm' })
-        if (blob.size > 0) submitCapture('', blob)
-        setCaptureRecording(false)
-      }
-      captureMediaRef.current = recorder
-      recorder.start()
-      setCaptureRecording(true)
-    } catch { alert('Permissão de microfone negada.'); setCaptureRecording(false) }
-  }
 
   async function sendMessage(text?: string, audioBlob?: Blob) {
     const userText = (text ?? input).trim()
@@ -636,9 +613,7 @@ export default function Home() {
       }
 
       if (data.transcription) {
-        setMessages(prev => prev.map((m, i) =>
-          i === prev.length - 1 ? { ...m, content: `🎤 "${data.transcription}"` } : m
-        ))
+        setMessages(prev => prev.map((m, i) => i === prev.length - 1 ? { ...m, content: `🎤 "${data.transcription}"` } : m))
       }
 
       setMessages(prev => [...prev, { role: 'assistant', content: data.message }])
@@ -659,10 +634,9 @@ export default function Home() {
           client_id: data.task.client_id || null,
         })
         historyRef.current = []
-        await loadTasks()
+        onTaskCreated()
       }
 
-      // daily_item is created server-side; just reload if date matches current daily view
       if (data.daily_item) {
         historyRef.current = []
       }
@@ -691,186 +665,11 @@ export default function Home() {
     } catch { alert('Permissão de microfone negada.'); setRecording(false) }
   }
 
-  async function toggleTask(task: Task) {
-    const next = task.status === 'concluida' ? 'pendente' : 'concluida'
-    await supabase.from('tasks').update({ status: next }).eq('id', task.id)
-    await loadTasks()
-  }
-
-  async function updateTask(id: string, updates: Partial<Task>) {
-    await supabase.from('tasks').update(updates).eq('id', id)
-    await loadTasks()
-  }
-
-  async function deleteTask(id: string) {
-    await supabase.from('tasks').delete().eq('id', id)
-    await loadTasks()
-  }
-
-  // Filter tasks
-  const byCategory = taskTab === 'todas' ? tasks : tasks.filter(t => t.category === taskTab)
-  const byClient = clientFilter ? byCategory.filter(t => t.client_id === clientFilter) : byCategory
-  const byPriority = filterPriority ? byClient.filter(t => t.priority === filterPriority) : byClient
-  const byDeadline = filterDeadline ? byPriority.filter(t => applyDeadlineFilter(t, filterDeadline)) : byPriority
-  const pending = byDeadline.filter(t => t.status !== 'concluida')
-  const done = byDeadline.filter(t => t.status === 'concluida')
-
-  const tabCount = (k: TaskTab) => ({
-    todas: tasks.filter(t => t.status !== 'concluida').length,
-    trabalho: tasks.filter(t => t.category === 'trabalho' && t.status !== 'concluida').length,
-    pessoal: tasks.filter(t => t.category === 'pessoal' && t.status !== 'concluida').length,
-  }[k])
-
-  const activeClients = clients.filter(c => c.status === 'active')
-  const clientsWithTasks = activeClients.filter(c => tasks.some(t => t.client_id === c.id && t.status !== 'concluida'))
-
-  // ── Tasks Panel ──
-  const tasksPanel = (
-    <div className="flex flex-col flex-1 overflow-hidden bg-[#F2F2F7]">
-      <div className="px-4 pt-4 pb-2">
-        <div className="flex items-start justify-between">
-          <div>
-            <h1 className="text-[28px] font-bold text-gray-900 tracking-tight">Tarefas</h1>
-            <p className="text-[13px] text-gray-400 mt-0.5">{pending.length} pendente{pending.length !== 1 ? 's' : ''}</p>
-          </div>
-          <button onClick={handleSync} disabled={syncing}
-            className={`mt-1 flex items-center gap-1.5 bg-gray-800 text-white text-[13px] font-medium px-3 py-1.5 rounded-full transition-opacity ${syncing ? 'opacity-60' : ''}`}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" className={syncing ? 'animate-spin' : ''}>
-              <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-            </svg>
-            {syncing ? 'Sincronizando…' : 'Reuniões'}
-          </button>
-        </div>
-
-        {syncMsg && (
-          <div className={`mt-2 text-[13px] px-3 py-2 rounded-xl ${syncMsg.startsWith('✅') ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-600'}`}>
-            {syncMsg}
-          </div>
-        )}
-        {lastSync && (
-          <p className="text-[11px] text-gray-300 mt-1">
-            Último sync: {new Date(lastSync).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
-          </p>
-        )}
-
-        {/* Quick capture bar */}
-        <div className="mt-3 flex gap-2 bg-white rounded-2xl px-3 py-2 shadow-sm">
-          <button onClick={toggleCaptureRecording}
-            className={`shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-all ${captureRecording ? 'bg-red-500 animate-pulse' : 'bg-gray-100 text-gray-400'}`}
-            title={captureRecording ? 'Parar gravação' : 'Gravar tarefa'}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-              <path d="M12 2a3 3 0 0 1 3 3v4a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3z" stroke={captureRecording ? 'white' : 'currentColor'} strokeWidth="1.8" strokeLinecap="round"/>
-              <path d="M19 10a7 7 0 0 1-14 0" stroke={captureRecording ? 'white' : 'currentColor'} strokeWidth="1.8" strokeLinecap="round"/>
-              <line x1="12" y1="17" x2="12" y2="21" stroke={captureRecording ? 'white' : 'currentColor'} strokeWidth="1.8" strokeLinecap="round"/>
-            </svg>
-          </button>
-          <input
-            className="flex-1 text-[15px] outline-none bg-transparent placeholder:text-gray-300"
-            placeholder={captureRecording ? 'Gravando…' : 'Nova tarefa… (Enter para criar)'}
-            value={quickInput}
-            onChange={e => setQuickInput(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && !capturing && submitCapture()}
-            disabled={capturing || captureRecording}
-          />
-          {capturing && (
-            <span className="shrink-0 flex gap-1 items-center">
-              {[0,120,240].map(d => (
-                <span key={d} className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: `${d}ms` }} />
-              ))}
-            </span>
-          )}
-        </div>
-
-        {/* Category tabs */}
-        <div className="flex gap-2 mt-3">
-          {(['todas','trabalho','pessoal'] as TaskTab[]).map(k => (
-            <button key={k} onClick={() => setTaskTab(k)}
-              className={`px-3.5 py-1.5 rounded-full text-[13px] font-medium transition-all ${taskTab === k ? 'bg-gray-900 text-white' : 'bg-white text-gray-500 shadow-sm'}`}>
-              {k === 'todas' ? 'Todas' : k === 'trabalho' ? '💼' : '🏠'}
-              <span className="ml-1.5 opacity-60">{tabCount(k)}</span>
-            </button>
-          ))}
-        </div>
-
-        {/* Client filter chips */}
-        {clientsWithTasks.length > 0 && (
-          <div className="flex gap-1.5 mt-2 overflow-x-auto pb-1 scrollbar-hide">
-            <button onClick={() => setClientFilter(null)}
-              className={`shrink-0 px-3 py-1 rounded-full text-[12px] font-medium transition-all ${!clientFilter ? 'bg-indigo-600 text-white' : 'bg-white text-gray-500 shadow-sm'}`}>
-              Todos
-            </button>
-            {clientsWithTasks.map(c => (
-              <button key={c.id} onClick={() => setClientFilter(clientFilter === c.id ? null : c.id)}
-                className={`shrink-0 px-3 py-1 rounded-full text-[12px] font-medium transition-all ${clientFilter === c.id ? 'bg-indigo-600 text-white' : 'bg-white text-indigo-600 shadow-sm'}`}>
-                {c.name}
-              </button>
-            ))}
-          </div>
-        )}
-
-        {/* Priority + deadline filters */}
-        <div className="flex gap-1.5 mt-2 overflow-x-auto pb-1 scrollbar-hide">
-          {(['alta','media','baixa'] as const).map(p => (
-            <button key={p} onClick={() => setFilterPriority(filterPriority === p ? null : p)}
-              className={`shrink-0 px-3 py-1 rounded-full text-[12px] font-semibold transition-all ${filterPriority === p ? P[p].btnCls : 'bg-white text-gray-400 shadow-sm'}`}>
-              {P[p].label}
-            </button>
-          ))}
-          <div className="w-px bg-gray-200 mx-0.5 shrink-0 self-stretch" />
-          {([
-            ['hoje', 'Hoje'],
-            ['semana', 'Esta semana'],
-            ['mes', 'Este mês'],
-            ['vencidas', 'Vencidas'],
-          ] as const).map(([k, label]) => (
-            <button key={k} onClick={() => setFilterDeadline(filterDeadline === k ? null : k)}
-              className={`shrink-0 px-3 py-1 rounded-full text-[12px] font-medium transition-all ${
-                filterDeadline === k
-                  ? k === 'vencidas' ? 'bg-red-500 text-white' : 'bg-gray-800 text-white'
-                  : 'bg-white text-gray-400 shadow-sm'
-              }`}>
-              {label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="flex-1 overflow-y-auto px-4 pb-6 space-y-2 mt-2">
-        {pending.length === 0 && done.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full text-gray-300 pb-20">
-            <span className="text-5xl mb-3">✅</span>
-            <p className="text-[15px]">Nenhuma tarefa ainda</p>
-            <p className="text-[13px] mt-1">Digite acima ou use o chat</p>
-          </div>
-        ) : (
-          <>
-            {pending.map(task => (
-              <TaskCard key={task.id} task={task} clients={clients} onOpen={() => setEditingTask(task)} onToggle={() => toggleTask(task)} />
-            ))}
-            {done.length > 0 && (
-              <>
-                <button onClick={() => setShowDone(v => !v)}
-                  className="flex items-center gap-2 text-[13px] text-gray-400 font-medium pt-2 pb-1 w-full">
-                  <span className={`transition-transform ${showDone ? 'rotate-90' : ''}`}>›</span>
-                  Concluídas ({done.length})
-                </button>
-                {showDone && done.map(task => (
-                  <TaskCard key={task.id} task={task} clients={clients} onOpen={() => setEditingTask(task)} onToggle={() => toggleTask(task)} />
-                ))}
-              </>
-            )}
-          </>
-        )}
-      </div>
-    </div>
-  )
-
-  // ── Chat Panel ──
-  const chatPanel = (
-    <div className="flex flex-col flex-1 overflow-hidden bg-[#F2F2F7]">
+  return (
+    <div className="flex flex-col h-full bg-[#F2F2F7]">
       <div className="px-4 pt-4 pb-3">
         <h1 className="text-[28px] font-bold text-gray-900 tracking-tight">Chat</h1>
-        <p className="text-[13px] text-gray-400 mt-0.5">Pergunte sobre clientes, calls ou tarefas</p>
+        <p className="text-[13px] text-gray-400 mt-0.5">Pergunte sobre clientes, reuniões ou tarefas</p>
       </div>
       <div className="flex-1 overflow-y-auto px-4 space-y-2 pb-4">
         {messages.map((m, i) => (
@@ -921,101 +720,244 @@ export default function Home() {
       </div>
     </div>
   )
+}
 
-  // ── SVG icons for tab bar ──
-  const tabIcons = {
-    tasks: (active: boolean) => (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-        <rect x="3" y="5" width="18" height="2" rx="1" fill={active ? '#3B82F6' : '#9CA3AF'}/>
-        <rect x="3" y="11" width="14" height="2" rx="1" fill={active ? '#3B82F6' : '#9CA3AF'}/>
-        <rect x="3" y="17" width="10" height="2" rx="1" fill={active ? '#3B82F6' : '#9CA3AF'}/>
-        <path d="M17 14l2 2 4-4" stroke={active ? '#3B82F6' : '#9CA3AF'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-      </svg>
-    ),
-    daily: (active: boolean) => (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-        <rect x="3" y="4" width="18" height="17" rx="2" stroke={active ? '#3B82F6' : '#9CA3AF'} strokeWidth="1.8"/>
-        <path d="M16 2v4M8 2v4" stroke={active ? '#3B82F6' : '#9CA3AF'} strokeWidth="1.8" strokeLinecap="round"/>
-        <path d="M3 9h18" stroke={active ? '#3B82F6' : '#9CA3AF'} strokeWidth="1.8"/>
-        <circle cx="8" cy="14" r="1" fill={active ? '#3B82F6' : '#9CA3AF'}/>
-        <circle cx="12" cy="14" r="1" fill={active ? '#3B82F6' : '#9CA3AF'}/>
-        <circle cx="16" cy="14" r="1" fill={active ? '#3B82F6' : '#9CA3AF'}/>
-      </svg>
-    ),
-    calls: (active: boolean) => (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-        <path d="M12 2a3 3 0 0 1 3 3v4a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3z" stroke={active ? '#3B82F6' : '#9CA3AF'} strokeWidth="1.8" strokeLinecap="round"/>
-        <path d="M19 10a7 7 0 0 1-14 0" stroke={active ? '#3B82F6' : '#9CA3AF'} strokeWidth="1.8" strokeLinecap="round"/>
-        <line x1="12" y1="17" x2="12" y2="21" stroke={active ? '#3B82F6' : '#9CA3AF'} strokeWidth="1.8" strokeLinecap="round"/>
-        <line x1="9" y1="21" x2="15" y2="21" stroke={active ? '#3B82F6' : '#9CA3AF'} strokeWidth="1.8" strokeLinecap="round"/>
-      </svg>
-    ),
-    chat: (active: boolean) => (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" stroke={active ? '#3B82F6' : '#9CA3AF'} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
-      </svg>
-    ),
+// ─── Home ─────────────────────────────────────────────────────
+export default function Home() {
+  const [activeTab, setActiveTab] = useState<ActiveTab>('tasks')
+  const [taskTab, setTaskTab] = useState<TaskTab>('todas')
+  const [clientFilter, setClientFilter] = useState<string | null>(null)
+  const [filterPriority, setFilterPriority] = useState<'alta'|'media'|'baixa'|null>(null)
+  const [filterDeadline, setFilterDeadline] = useState<'hoje'|'semana'|'mes'|'vencidas'|null>(null)
+
+  const [tasks, setTasks] = useState<Task[]>([])
+  const [clients, setClients] = useState<Client[]>([])
+  const [editingTask, setEditingTask] = useState<Task | null>(null)
+  const [creatingTask, setCreatingTask] = useState(false)
+  const [showDone, setShowDone] = useState(false)
+
+  const loadTasks = useCallback(async () => {
+    const { data } = await supabase.from('tasks').select('*')
+    if (data) setTasks([...data].sort((a, b) => urgencyScore(b) - urgencyScore(a)))
+  }, [])
+
+  const loadClients = useCallback(async () => {
+    const { data } = await supabase.from('clients').select('*').order('status').order('name')
+    if (data) setClients(data)
+  }, [])
+
+  useEffect(() => { loadTasks(); loadClients() }, [loadTasks, loadClients])
+
+  async function toggleTask(task: Task) {
+    const next = task.status === 'concluida' ? 'pendente' : 'concluida'
+    await supabase.from('tasks').update({ status: next }).eq('id', task.id)
+    await loadTasks()
   }
 
-  const pendingAllTasks = tasks.filter(t => t.status !== 'concluida').length
+  async function updateTask(id: string, updates: Partial<Task>) {
+    await supabase.from('tasks').update(updates).eq('id', id)
+    await loadTasks()
+  }
+
+  async function createTask(data: Partial<Task>) {
+    await supabase.from('tasks').insert({
+      title: data.title!,
+      description: data.description || null,
+      priority: data.priority || 'media',
+      deadline: data.deadline || null,
+      category: data.category || 'trabalho',
+      status: 'pendente',
+      client_id: data.client_id || null,
+      notes: data.notes || null,
+    })
+    await loadTasks()
+  }
+
+  async function deleteTask(id: string) {
+    await supabase.from('tasks').delete().eq('id', id)
+    await loadTasks()
+  }
+
+  const byCategory = taskTab === 'todas' ? tasks : tasks.filter(t => t.category === taskTab)
+  const byClient = clientFilter ? byCategory.filter(t => t.client_id === clientFilter) : byCategory
+  const byPriority = filterPriority ? byClient.filter(t => t.priority === filterPriority) : byClient
+  const byDeadline = filterDeadline ? byPriority.filter(t => applyDeadlineFilter(t, filterDeadline)) : byPriority
+  const pending = byDeadline.filter(t => t.status !== 'concluida')
+  const done = byDeadline.filter(t => t.status === 'concluida')
+
+  const tabCount = (k: TaskTab) => ({
+    todas: tasks.filter(t => t.status !== 'concluida').length,
+    trabalho: tasks.filter(t => t.category === 'trabalho' && t.status !== 'concluida').length,
+    pessoal: tasks.filter(t => t.category === 'pessoal' && t.status !== 'concluida').length,
+  }[k])
+
+  const activeClients = clients.filter(c => c.status === 'active')
+  const clientsWithTasks = activeClients.filter(c => tasks.some(t => t.client_id === c.id && t.status !== 'concluida'))
+  const pendingCount = tasks.filter(t => t.status !== 'concluida').length
+
+  const NAV_HEIGHT = 88
 
   return (
     <div className="h-screen flex flex-col overflow-hidden" style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", sans-serif', background: '#F2F2F7' }}>
 
-      {/* ── Desktop: tasks left + secondary panel right ── */}
-      <div className="hidden md:flex flex-1 overflow-hidden">
-        <div className="flex-1 flex flex-col overflow-hidden border-r border-gray-200/70">
-          {tasksPanel}
-        </div>
-        <div className="w-[400px] flex flex-col overflow-hidden">
-          {/* Right panel tab bar */}
-          <div className="flex border-b border-gray-200/70 bg-white shrink-0">
-            {(['daily', 'calls', 'chat'] as const).map(tab => (
-              <button key={tab} onClick={() => setRightTab(tab)}
-                className={`flex-1 py-3 text-[13px] font-medium transition-colors ${rightTab === tab ? 'text-blue-500 border-b-2 border-blue-500' : 'text-gray-400'}`}>
-                {tab === 'daily' ? 'Daily' : tab === 'calls' ? 'Calls' : 'Chat'}
-              </button>
-            ))}
-          </div>
-          <div className="flex-1 overflow-hidden flex flex-col">
-            {rightTab === 'daily' && <DailyView clients={clients} />}
-            {rightTab === 'calls' && <CallsView summaries={callSummaries} clients={clients} />}
-            {rightTab === 'chat' && chatPanel}
-          </div>
-        </div>
-      </div>
+      {/* ── Full-screen tab content ── */}
+      <div className="flex-1 overflow-hidden flex flex-col" style={{ paddingBottom: `${NAV_HEIGHT}px` }}>
 
-      {/* ── Mobile: full-screen + bottom tab bar ── */}
-      <div className="md:hidden flex flex-col flex-1 overflow-hidden">
-        <div className="flex-1 overflow-hidden flex flex-col">
-          {activeTab === 'tasks' && tasksPanel}
-          {activeTab === 'daily' && <DailyView clients={clients} />}
-          {activeTab === 'calls' && <CallsView summaries={callSummaries} clients={clients} />}
-          {activeTab === 'chat' && chatPanel}
-        </div>
+        {/* ── Tasks ── */}
+        {activeTab === 'tasks' && (
+          <div className="flex flex-col h-full overflow-hidden bg-[#F2F2F7]">
+            <div className="px-4 pt-4 pb-2">
+              <h1 className="text-[28px] font-bold text-gray-900 tracking-tight">Tarefas</h1>
+              <p className="text-[13px] text-gray-400 mt-0.5">{pending.length} pendente{pending.length !== 1 ? 's' : ''}</p>
 
-        <nav className="shrink-0 bg-white/90 backdrop-blur-md border-t border-gray-200/60 flex"
-          style={{ height: '88px', paddingBottom: 'max(env(safe-area-inset-bottom), 20px)' }}>
-          {([
-            ['tasks', 'Tarefas'],
-            ['daily', 'Daily'],
-            ['calls', 'Calls'],
-            ['chat', 'Chat'],
-          ] as [ActiveTab, string][]).map(([key, label]) => (
-            <button key={key} onClick={() => setActiveTab(key)}
-              className={`relative flex-1 flex flex-col items-center justify-center gap-0.5 pt-2 transition-colors ${activeTab === key ? 'text-blue-500' : 'text-gray-400'}`}>
-              {tabIcons[key](activeTab === key)}
-              <span className="text-[10px] font-medium tracking-wide">{label}</span>
-              {key === 'tasks' && pendingAllTasks > 0 && (
-                <span className="absolute top-2 right-[calc(50%-14px)] bg-red-500 text-white text-[9px] font-bold rounded-full min-w-[16px] h-4 px-1 flex items-center justify-center">
-                  {pendingAllTasks > 9 ? '9+' : pendingAllTasks}
-                </span>
+              {/* Category tabs */}
+              <div className="flex gap-2 mt-3">
+                {(['todas','trabalho','pessoal'] as TaskTab[]).map(k => (
+                  <button key={k} onClick={() => setTaskTab(k)}
+                    className={`px-3.5 py-1.5 rounded-full text-[13px] font-medium transition-all ${taskTab === k ? 'bg-gray-900 text-white' : 'bg-white text-gray-500 shadow-sm'}`}>
+                    {k === 'todas' ? 'Todas' : k === 'trabalho' ? '💼' : '🏠'}
+                    <span className="ml-1.5 opacity-60">{tabCount(k)}</span>
+                  </button>
+                ))}
+              </div>
+
+              {/* Client filter chips */}
+              {clientsWithTasks.length > 0 && (
+                <div className="flex gap-1.5 mt-2 overflow-x-auto pb-1 scrollbar-hide">
+                  <button onClick={() => setClientFilter(null)}
+                    className={`shrink-0 px-3 py-1 rounded-full text-[12px] font-medium transition-all ${!clientFilter ? 'bg-indigo-600 text-white' : 'bg-white text-gray-500 shadow-sm'}`}>
+                    Todos
+                  </button>
+                  {clientsWithTasks.map(c => (
+                    <button key={c.id} onClick={() => setClientFilter(clientFilter === c.id ? null : c.id)}
+                      className={`shrink-0 px-3 py-1 rounded-full text-[12px] font-medium transition-all ${clientFilter === c.id ? 'bg-indigo-600 text-white' : 'bg-white text-indigo-600 shadow-sm'}`}>
+                      {c.name}
+                    </button>
+                  ))}
+                </div>
               )}
+
+              {/* Priority + deadline filters */}
+              <div className="flex gap-1.5 mt-2 overflow-x-auto pb-1 scrollbar-hide">
+                {(['alta','media','baixa'] as const).map(p => (
+                  <button key={p} onClick={() => setFilterPriority(filterPriority === p ? null : p)}
+                    className={`shrink-0 px-3 py-1 rounded-full text-[12px] font-semibold transition-all ${filterPriority === p ? P[p].btnCls : 'bg-white text-gray-400 shadow-sm'}`}>
+                    {P[p].label}
+                  </button>
+                ))}
+                <div className="w-px bg-gray-200 mx-0.5 shrink-0 self-stretch" />
+                {([
+                  ['hoje', 'Hoje'],
+                  ['semana', 'Esta semana'],
+                  ['mes', 'Este mês'],
+                  ['vencidas', 'Vencidas'],
+                ] as const).map(([k, label]) => (
+                  <button key={k} onClick={() => setFilterDeadline(filterDeadline === k ? null : k)}
+                    className={`shrink-0 px-3 py-1 rounded-full text-[12px] font-medium transition-all ${
+                      filterDeadline === k
+                        ? k === 'vencidas' ? 'bg-red-500 text-white' : 'bg-gray-800 text-white'
+                        : 'bg-white text-gray-400 shadow-sm'
+                    }`}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-4 pb-6 space-y-2 mt-2">
+              {pending.length === 0 && done.length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-full text-gray-300 pb-20">
+                  <span className="text-5xl mb-3">✅</span>
+                  <p className="text-[15px]">Nenhuma tarefa ainda</p>
+                  <p className="text-[13px] mt-1">Toque no ＋ para criar</p>
+                </div>
+              ) : (
+                <>
+                  {pending.map(task => (
+                    <TaskCard key={task.id} task={task} clients={clients} onOpen={() => setEditingTask(task)} onToggle={() => toggleTask(task)} />
+                  ))}
+                  {done.length > 0 && (
+                    <>
+                      <button onClick={() => setShowDone(v => !v)}
+                        className="flex items-center gap-2 text-[13px] text-gray-400 font-medium pt-2 pb-1 w-full">
+                        <span className={`transition-transform ${showDone ? 'rotate-90' : ''}`}>›</span>
+                        Concluídas ({done.length})
+                      </button>
+                      {showDone && done.map(task => (
+                        <TaskCard key={task.id} task={task} clients={clients} onOpen={() => setEditingTask(task)} onToggle={() => toggleTask(task)} />
+                      ))}
+                    </>
+                  )}
+                </>
+              )}
+            </div>
+
+            {/* FAB */}
+            <button onClick={() => setCreatingTask(true)}
+              className="fixed right-5 z-10 w-14 h-14 bg-blue-500 rounded-full flex items-center justify-center shadow-lg active:scale-95 transition-transform"
+              style={{ bottom: `${NAV_HEIGHT + 16}px` }}>
+              <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+                <path d="M11 1V21M1 11H21" stroke="white" strokeWidth="2.5" strokeLinecap="round"/>
+              </svg>
             </button>
-          ))}
-        </nav>
+          </div>
+        )}
+
+        {activeTab === 'daily' && <DailyView clients={clients} />}
+        {activeTab === 'meetings' && <MeetingsView onTasksUpdated={loadTasks} />}
+        {activeTab === 'chat' && <ChatView onTaskCreated={loadTasks} />}
       </div>
 
+      {/* ── Bottom nav bar ── */}
+      <nav className="fixed bottom-0 left-0 right-0 bg-white/90 backdrop-blur-md border-t border-gray-200/60 flex z-20"
+        style={{ height: `${NAV_HEIGHT}px`, paddingBottom: 'max(env(safe-area-inset-bottom), 20px)' }}>
+        {([
+          ['tasks', 'Tarefas', (a: boolean) => (
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+              <rect x="3" y="5" width="18" height="2" rx="1" fill={a ? '#3B82F6' : '#9CA3AF'}/>
+              <rect x="3" y="11" width="14" height="2" rx="1" fill={a ? '#3B82F6' : '#9CA3AF'}/>
+              <rect x="3" y="17" width="10" height="2" rx="1" fill={a ? '#3B82F6' : '#9CA3AF'}/>
+              <path d="M17 14l2 2 4-4" stroke={a ? '#3B82F6' : '#9CA3AF'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          )],
+          ['daily', 'Daily', (a: boolean) => (
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+              <rect x="3" y="4" width="18" height="17" rx="2" stroke={a ? '#3B82F6' : '#9CA3AF'} strokeWidth="1.8"/>
+              <path d="M16 2v4M8 2v4" stroke={a ? '#3B82F6' : '#9CA3AF'} strokeWidth="1.8" strokeLinecap="round"/>
+              <path d="M3 9h18" stroke={a ? '#3B82F6' : '#9CA3AF'} strokeWidth="1.8"/>
+              <circle cx="8" cy="14" r="1" fill={a ? '#3B82F6' : '#9CA3AF'}/>
+              <circle cx="12" cy="14" r="1" fill={a ? '#3B82F6' : '#9CA3AF'}/>
+              <circle cx="16" cy="14" r="1" fill={a ? '#3B82F6' : '#9CA3AF'}/>
+            </svg>
+          )],
+          ['meetings', 'Reuniões', (a: boolean) => (
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" stroke={a ? '#3B82F6' : '#9CA3AF'} strokeWidth="1.8" strokeLinecap="round"/>
+              <circle cx="9" cy="7" r="4" stroke={a ? '#3B82F6' : '#9CA3AF'} strokeWidth="1.8"/>
+              <path d="M23 21v-2a4 4 0 0 0-3-3.87" stroke={a ? '#3B82F6' : '#9CA3AF'} strokeWidth="1.8" strokeLinecap="round"/>
+              <path d="M16 3.13a4 4 0 0 1 0 7.75" stroke={a ? '#3B82F6' : '#9CA3AF'} strokeWidth="1.8" strokeLinecap="round"/>
+            </svg>
+          )],
+          ['chat', 'Chat', (a: boolean) => (
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" stroke={a ? '#3B82F6' : '#9CA3AF'} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          )],
+        ] as [ActiveTab, string, (a: boolean) => React.ReactNode][]).map(([key, label, icon]) => (
+          <button key={key} onClick={() => setActiveTab(key)}
+            className={`relative flex-1 flex flex-col items-center justify-center gap-0.5 pt-2 transition-colors ${activeTab === key ? 'text-blue-500' : 'text-gray-400'}`}>
+            {icon(activeTab === key)}
+            <span className="text-[10px] font-medium tracking-wide">{label}</span>
+            {key === 'tasks' && pendingCount > 0 && (
+              <span className="absolute top-2 right-[calc(50%-14px)] bg-red-500 text-white text-[9px] font-bold rounded-full min-w-[16px] h-4 px-1 flex items-center justify-center">
+                {pendingCount > 9 ? '9+' : pendingCount}
+              </span>
+            )}
+          </button>
+        ))}
+      </nav>
+
+      {/* ── Task sheets ── */}
       {editingTask && (
         <TaskSheet
           task={editingTask}
@@ -1023,6 +965,14 @@ export default function Home() {
           onClose={() => setEditingTask(null)}
           onSave={async u => { await updateTask(editingTask.id, u) }}
           onDelete={() => { deleteTask(editingTask.id); setEditingTask(null) }}
+        />
+      )}
+      {creatingTask && (
+        <TaskSheet
+          task={null}
+          clients={clients}
+          onClose={() => setCreatingTask(false)}
+          onSave={async u => { await createTask(u) }}
         />
       )}
     </div>
