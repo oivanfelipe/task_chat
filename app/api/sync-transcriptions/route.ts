@@ -143,6 +143,56 @@ Se não houver tarefas de Ivan Felipe, retorne: []`,
   }
 }
 
+async function extractClientInsights(
+  text: string,
+  docName: string,
+  clients: Array<{ id: string; name: string }>
+) {
+  const clientList = clients.map(c => c.name).join(', ')
+
+  const completion = await groq.chat.completions.create({
+    model: 'llama-3.3-70b-versatile',
+    temperature: 0.2,
+    max_tokens: 2000,
+    messages: [
+      {
+        role: 'system',
+        content: `Você analisa transcrições de reuniões e extrai insights relevantes para cada cliente mencionado.
+Lista de clientes conhecidos: ${clientList}
+
+Para cada cliente MENCIONADO na transcrição (pode ser zero, um ou vários), retorne:
+- "client_name": nome exato da lista acima
+- "key_decisions": array de decisões tomadas envolvendo este cliente
+- "open_items": array de itens em aberto, pendentes ou a resolver com este cliente
+- "context": 1-2 frases de contexto geral sobre este cliente na reunião
+
+Retorne APENAS um JSON array (sem markdown, sem texto adicional):
+[{"client_name":"...","key_decisions":["..."],"open_items":["..."],"context":"..."}]
+
+Se nenhum cliente for identificado, retorne: []`,
+      },
+      {
+        role: 'user',
+        content: `Nome do documento: "${docName}"\n\nTranscrição:\n${text.slice(0, 9000)}`,
+      },
+    ],
+  })
+
+  const content = completion.choices[0].message.content || '[]'
+  try {
+    const match = content.match(/\[[\s\S]*\]/)
+    return match ? (JSON.parse(match[0]) as Array<{
+      client_name: string
+      key_decisions: string[]
+      open_items: string[]
+      context: string
+    }>) : []
+  } catch {
+    console.error('ClientInsights JSON parse error:', content.slice(0, 200))
+    return []
+  }
+}
+
 async function extractCallSummary(text: string, docName: string) {
   const completion = await groq.chat.completions.create({
     model: 'llama-3.3-70b-versatile',
@@ -236,9 +286,10 @@ export async function POST() {
           continue
         }
 
-        const [tasks, callSummary] = await Promise.all([
+        const [tasks, callSummary, clientInsights] = await Promise.all([
           extractTasks(text, doc.name),
           extractCallSummary(text, doc.name),
+          extractClientInsights(text, doc.name, clients),
         ])
 
         if (tasks.length > 0) {
@@ -257,8 +308,13 @@ export async function POST() {
           totalTasks += tasks.length
         }
 
+        // Resolve client IDs from insights
+        const resolvedClientIds = clientInsights
+          .map(ci => resolveClientId(`[${ci.client_name}]`, clients))
+          .filter((id): id is string => id !== null)
+
         if (callSummary) {
-          await supabase.from('call_summaries').upsert({
+          const { data: savedSummary } = await supabase.from('call_summaries').upsert({
             doc_id: doc.id,
             doc_name: doc.name,
             summary: callSummary.summary || '',
@@ -266,7 +322,25 @@ export async function POST() {
             key_points: callSummary.key_points || [],
             meeting_date: callSummary.meeting_date || null,
             action_items_count: tasks.length,
-          }, { onConflict: 'doc_id' })
+            client_ids: resolvedClientIds,
+          }, { onConflict: 'doc_id' }).select('id').single()
+
+          if (savedSummary && clientInsights.length > 0) {
+            for (const ci of clientInsights) {
+              const clientId = resolveClientId(`[${ci.client_name}]`, clients)
+              if (!clientId) continue
+              await supabase.from('client_meeting_insights').upsert({
+                call_summary_id: savedSummary.id,
+                client_id: clientId,
+                doc_name: doc.name,
+                meeting_date: callSummary.meeting_date || null,
+                key_decisions: ci.key_decisions || [],
+                open_items: ci.open_items || [],
+                context: ci.context || null,
+              }, { onConflict: 'call_summary_id,client_id' })
+            }
+          }
+
           totalSummaries++
           summaryIds.add(doc.id)
         }
@@ -287,9 +361,17 @@ export async function POST() {
         const text = await exportDocAsText(doc.id)
         if (!text.trim()) continue
 
-        const callSummary = await extractCallSummary(text, doc.name)
+        const [callSummary, clientInsights] = await Promise.all([
+          extractCallSummary(text, doc.name),
+          extractClientInsights(text, doc.name, clients),
+        ])
+
         if (callSummary) {
-          await supabase.from('call_summaries').upsert({
+          const resolvedClientIds = clientInsights
+            .map(ci => resolveClientId(`[${ci.client_name}]`, clients))
+            .filter((id): id is string => id !== null)
+
+          const { data: savedSummary } = await supabase.from('call_summaries').upsert({
             doc_id: doc.id,
             doc_name: doc.name,
             summary: callSummary.summary || '',
@@ -297,7 +379,25 @@ export async function POST() {
             key_points: callSummary.key_points || [],
             meeting_date: callSummary.meeting_date || null,
             action_items_count: 0,
-          }, { onConflict: 'doc_id' })
+            client_ids: resolvedClientIds,
+          }, { onConflict: 'doc_id' }).select('id').single()
+
+          if (savedSummary && clientInsights.length > 0) {
+            for (const ci of clientInsights) {
+              const clientId = resolveClientId(`[${ci.client_name}]`, clients)
+              if (!clientId) continue
+              await supabase.from('client_meeting_insights').upsert({
+                call_summary_id: savedSummary.id,
+                client_id: clientId,
+                doc_name: doc.name,
+                meeting_date: callSummary.meeting_date || null,
+                key_decisions: ci.key_decisions || [],
+                open_items: ci.open_items || [],
+                context: ci.context || null,
+              }, { onConflict: 'call_summary_id,client_id' })
+            }
+          }
+
           totalSummaries++
         }
       } catch (err) {
