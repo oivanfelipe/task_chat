@@ -2,6 +2,22 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { supabase, type Task, type Client, type CallSummary, type DailyItem } from '@/lib/supabase'
 
+function applyDeadlineFilter(task: Task, filter: string) {
+  const today = new Date(); today.setHours(0, 0, 0, 0)
+  const dl = task.deadline ? new Date(task.deadline + 'T00:00:00') : null
+  if (filter === 'vencidas') return dl ? dl < today : false
+  if (filter === 'hoje') return dl ? dl.getTime() === today.getTime() : false
+  if (filter === 'semana') {
+    const week = new Date(today); week.setDate(week.getDate() + 7)
+    return dl ? dl >= today && dl <= week : false
+  }
+  if (filter === 'mes') {
+    const month = new Date(today); month.setMonth(month.getMonth() + 1)
+    return dl ? dl >= today && dl <= month : false
+  }
+  return true
+}
+
 type Message = { role: 'user' | 'assistant'; content: string }
 type HistoryItem = { role: 'user' | 'assistant'; content: string }
 type ActiveTab = 'tasks' | 'daily' | 'calls' | 'chat'
@@ -252,13 +268,17 @@ function TaskSheet({ task, clients, onClose, onSave, onDelete }: {
 }
 
 // ─── DailyView ────────────────────────────────────────────────
-function DailyView() {
+function DailyView({ clients }: { clients: Client[] }) {
   const [date, setDate] = useState(todayISO())
   const [items, setItems] = useState<DailyItem[]>([])
   const [newText, setNewText] = useState('')
+  const [newClientId, setNewClientId] = useState('')
   const [adding, setAdding] = useState(false)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editText, setEditText] = useState('')
 
   const isFuture = date > todayISO()
+  const activeClients = clients.filter(c => c.status === 'active')
 
   const load = useCallback(async () => {
     const res = await fetch(`/api/daily?date=${date}`)
@@ -271,8 +291,13 @@ function DailyView() {
   async function addItem() {
     if (!newText.trim()) return
     setAdding(true)
-    await fetch('/api/daily', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ date, text: newText.trim() }) })
+    await fetch('/api/daily', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, text: newText.trim(), client_id: newClientId || null }),
+    })
     setNewText('')
+    setNewClientId('')
     await load()
     setAdding(false)
   }
@@ -280,6 +305,19 @@ function DailyView() {
   async function toggleItem(item: DailyItem) {
     await fetch('/api/daily', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: item.id, done: !item.done }) })
     setItems(prev => prev.map(i => i.id === item.id ? { ...i, done: !i.done } : i))
+  }
+
+  function startEdit(item: DailyItem) {
+    setEditingId(item.id)
+    setEditText(item.text)
+  }
+
+  async function saveEdit(item: DailyItem) {
+    const text = editText.trim()
+    if (!text) { setEditingId(null); return }
+    await fetch('/api/daily', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: item.id, text }) })
+    setItems(prev => prev.map(i => i.id === item.id ? { ...i, text } : i))
+    setEditingId(null)
   }
 
   return (
@@ -307,25 +345,59 @@ function DailyView() {
             <p className="text-[15px]">{isFuture ? 'Pré-anote itens para este dia' : 'Nenhum item ainda'}</p>
           </div>
         )}
-        {items.map(item => (
-          <div key={item.id} className="bg-white rounded-2xl flex items-center gap-3 px-4 py-3">
-            <button onClick={() => toggleItem(item)} className="shrink-0 w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all"
-              style={{ borderColor: item.done ? '#3B82F6' : '#D1D5DB', background: item.done ? '#3B82F6' : 'transparent' }}>
-              {item.done && (
-                <svg width="11" height="8" viewBox="0 0 11 8" fill="none">
-                  <path d="M1 3.8L4 6.8L10 1" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
-                </svg>
+        {items.map(item => {
+          const clientName = item.client_id ? clients.find(c => c.id === item.client_id)?.name : null
+          return (
+            <div key={item.id} className="bg-white rounded-2xl px-4 py-3">
+              <div className="flex items-center gap-3">
+                <button onClick={() => toggleItem(item)} className="shrink-0 w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all"
+                  style={{ borderColor: item.done ? '#3B82F6' : '#D1D5DB', background: item.done ? '#3B82F6' : 'transparent' }}>
+                  {item.done && (
+                    <svg width="11" height="8" viewBox="0 0 11 8" fill="none">
+                      <path d="M1 3.8L4 6.8L10 1" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                  )}
+                </button>
+                {editingId === item.id ? (
+                  <input
+                    className="flex-1 text-[15px] outline-none bg-gray-50 rounded-xl px-2 py-1"
+                    autoFocus
+                    value={editText}
+                    onChange={e => setEditText(e.target.value)}
+                    onBlur={() => saveEdit(item)}
+                    onKeyDown={e => { if (e.key === 'Enter') saveEdit(item); if (e.key === 'Escape') setEditingId(null) }}
+                  />
+                ) : (
+                  <p
+                    onClick={() => !item.done && startEdit(item)}
+                    className={`flex-1 text-[15px] text-gray-800 ${item.done ? 'line-through text-gray-400' : 'cursor-text'}`}
+                  >{item.text}</p>
+                )}
+              </div>
+              {clientName && (
+                <div className="ml-9 mt-1">
+                  <span className="text-[11px] font-semibold bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-full">{clientName}</span>
+                </div>
               )}
-            </button>
-            <p className={`flex-1 text-[15px] text-gray-800 ${item.done ? 'line-through text-gray-400' : ''}`}>{item.text}</p>
-          </div>
-        ))}
+            </div>
+          )
+        })}
       </div>
 
-      <div className="px-4 py-3 bg-[#F2F2F7]">
+      <div className="px-4 py-3 bg-[#F2F2F7] space-y-2">
+        {activeClients.length > 0 && (
+          <select
+            className="w-full text-[13px] text-gray-500 bg-white rounded-xl px-3 py-2 outline-none shadow-sm"
+            value={newClientId}
+            onChange={e => setNewClientId(e.target.value)}
+          >
+            <option value="">Sem cliente</option>
+            {activeClients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        )}
         <div className="flex gap-2 bg-white rounded-2xl px-4 py-2.5 shadow-sm">
           <input className="flex-1 text-[15px] outline-none bg-transparent placeholder:text-gray-300"
-            placeholder="Adicionar item…" value={newText}
+            placeholder="Adicionar pauta…" value={newText}
             onChange={e => setNewText(e.target.value)}
             onKeyDown={e => e.key === 'Enter' && !adding && addItem()} />
           <button onClick={addItem} disabled={adding || !newText.trim()} className="shrink-0 w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center disabled:opacity-30">
@@ -340,7 +412,9 @@ function DailyView() {
 }
 
 // ─── CallsView ────────────────────────────────────────────────
-function CallsView({ summaries }: { summaries: CallSummary[] }) {
+function CallsView({ summaries, clients }: { summaries: CallSummary[]; clients: Client[] }) {
+  const [expanded, setExpanded] = useState<string | null>(null)
+
   return (
     <div className="flex flex-col h-full bg-[#F2F2F7]">
       <div className="px-4 pt-4 pb-2">
@@ -359,37 +433,58 @@ function CallsView({ summaries }: { summaries: CallSummary[] }) {
             <p className="text-[13px] mt-1">Sincronize reuniões na aba Tarefas</p>
           </div>
         )}
-        {summaries.map(cs => (
-          <div key={cs.id} className="bg-white rounded-2xl px-4 py-4">
-            <div className="flex items-start justify-between gap-2">
-              <p className="text-[15px] font-semibold text-gray-900 flex-1 leading-snug">{cs.doc_name}</p>
-              {cs.meeting_date && (
-                <span className="text-[11px] text-gray-400 shrink-0 mt-0.5">
-                  {new Date(cs.meeting_date + 'T00:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })}
-                </span>
+        {summaries.map(cs => {
+          const isOpen = expanded === cs.id
+          const callClients = (cs.client_ids || [])
+            .map(id => clients.find(c => c.id === id))
+            .filter(Boolean) as Client[]
+          return (
+            <div key={cs.id} className="bg-white rounded-2xl px-4 py-4 cursor-pointer" onClick={() => setExpanded(isOpen ? null : cs.id)}>
+              <div className="flex items-start justify-between gap-2">
+                <p className="text-[15px] font-semibold text-gray-900 flex-1 leading-snug">{cs.doc_name}</p>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {cs.meeting_date && (
+                    <span className="text-[11px] text-gray-400">
+                      {new Date(cs.meeting_date + 'T00:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })}
+                    </span>
+                  )}
+                  <svg width="7" height="12" viewBox="0 0 7 12" fill="none" className={`transition-transform ${isOpen ? 'rotate-90' : ''}`}>
+                    <path d="M1 1L6 6L1 11" stroke="#C7C7CC" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                </div>
+              </div>
+              {callClients.length > 0 && (
+                <div className="flex gap-1.5 flex-wrap mt-1.5">
+                  {callClients.map(c => (
+                    <span key={c.id} className="text-[11px] font-semibold bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-full">{c.name}</span>
+                  ))}
+                </div>
+              )}
+              {cs.participants && (
+                <p className="text-[12px] text-gray-400 mt-1">{cs.participants}</p>
+              )}
+              <p className="text-[13px] text-gray-600 mt-2 leading-relaxed">{cs.summary}</p>
+              {isOpen && (
+                <div className="mt-3 space-y-2">
+                  {cs.key_points?.length > 0 && (
+                    <ul className="space-y-1">
+                      {cs.key_points.map((kp, i) => (
+                        <li key={i} className="text-[12px] text-gray-500 flex gap-1.5">
+                          <span className="text-gray-300 shrink-0">·</span>{kp}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {cs.action_items_count > 0 && (
+                    <p className="text-[11px] text-green-600 font-medium">
+                      {cs.action_items_count} tarefa{cs.action_items_count !== 1 ? 's' : ''} extraída{cs.action_items_count !== 1 ? 's' : ''}
+                    </p>
+                  )}
+                </div>
               )}
             </div>
-            {cs.participants && (
-              <p className="text-[12px] text-indigo-500 font-medium mt-1">{cs.participants}</p>
-            )}
-            <p className="text-[13px] text-gray-600 mt-2 leading-relaxed">{cs.summary}</p>
-            {cs.key_points?.length > 0 && (
-              <ul className="mt-2 space-y-1">
-                {cs.key_points.map((kp, i) => (
-                  <li key={i} className="text-[12px] text-gray-500 flex gap-1.5">
-                    <span className="text-gray-300 shrink-0">·</span>
-                    {kp}
-                  </li>
-                ))}
-              </ul>
-            )}
-            {cs.action_items_count > 0 && (
-              <p className="text-[11px] text-green-600 font-medium mt-2">
-                {cs.action_items_count} tarefa{cs.action_items_count !== 1 ? 's' : ''} extraída{cs.action_items_count !== 1 ? 's' : ''}
-              </p>
-            )}
-          </div>
-        ))}
+          )
+        })}
       </div>
     </div>
   )
@@ -401,6 +496,8 @@ export default function Home() {
   const [rightTab, setRightTab] = useState<'daily' | 'calls' | 'chat'>('chat')
   const [taskTab, setTaskTab] = useState<TaskTab>('todas')
   const [clientFilter, setClientFilter] = useState<string | null>(null)
+  const [filterPriority, setFilterPriority] = useState<'alta'|'media'|'baixa'|null>(null)
+  const [filterDeadline, setFilterDeadline] = useState<'hoje'|'semana'|'mes'|'vencidas'|null>(null)
 
   const [tasks, setTasks] = useState<Task[]>([])
   const [clients, setClients] = useState<Client[]>([])
@@ -564,6 +661,11 @@ export default function Home() {
         historyRef.current = []
         await loadTasks()
       }
+
+      // daily_item is created server-side; just reload if date matches current daily view
+      if (data.daily_item) {
+        historyRef.current = []
+      }
     } catch {
       setMessages(prev => [...prev, { role: 'assistant', content: '❌ Erro de conexão. Tente novamente.' }])
     }
@@ -608,8 +710,10 @@ export default function Home() {
   // Filter tasks
   const byCategory = taskTab === 'todas' ? tasks : tasks.filter(t => t.category === taskTab)
   const byClient = clientFilter ? byCategory.filter(t => t.client_id === clientFilter) : byCategory
-  const pending = byClient.filter(t => t.status !== 'concluida')
-  const done = byClient.filter(t => t.status === 'concluida')
+  const byPriority = filterPriority ? byClient.filter(t => t.priority === filterPriority) : byClient
+  const byDeadline = filterDeadline ? byPriority.filter(t => applyDeadlineFilter(t, filterDeadline)) : byPriority
+  const pending = byDeadline.filter(t => t.status !== 'concluida')
+  const done = byDeadline.filter(t => t.status === 'concluida')
 
   const tabCount = (k: TaskTab) => ({
     todas: tasks.filter(t => t.status !== 'concluida').length,
@@ -703,6 +807,32 @@ export default function Home() {
             ))}
           </div>
         )}
+
+        {/* Priority + deadline filters */}
+        <div className="flex gap-1.5 mt-2 overflow-x-auto pb-1 scrollbar-hide">
+          {(['alta','media','baixa'] as const).map(p => (
+            <button key={p} onClick={() => setFilterPriority(filterPriority === p ? null : p)}
+              className={`shrink-0 px-3 py-1 rounded-full text-[12px] font-semibold transition-all ${filterPriority === p ? P[p].btnCls : 'bg-white text-gray-400 shadow-sm'}`}>
+              {P[p].label}
+            </button>
+          ))}
+          <div className="w-px bg-gray-200 mx-0.5 shrink-0 self-stretch" />
+          {([
+            ['hoje', 'Hoje'],
+            ['semana', 'Esta semana'],
+            ['mes', 'Este mês'],
+            ['vencidas', 'Vencidas'],
+          ] as const).map(([k, label]) => (
+            <button key={k} onClick={() => setFilterDeadline(filterDeadline === k ? null : k)}
+              className={`shrink-0 px-3 py-1 rounded-full text-[12px] font-medium transition-all ${
+                filterDeadline === k
+                  ? k === 'vencidas' ? 'bg-red-500 text-white' : 'bg-gray-800 text-white'
+                  : 'bg-white text-gray-400 shadow-sm'
+              }`}>
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 pb-6 space-y-2 mt-2">
@@ -848,8 +978,8 @@ export default function Home() {
             ))}
           </div>
           <div className="flex-1 overflow-hidden flex flex-col">
-            {rightTab === 'daily' && <DailyView />}
-            {rightTab === 'calls' && <CallsView summaries={callSummaries} />}
+            {rightTab === 'daily' && <DailyView clients={clients} />}
+            {rightTab === 'calls' && <CallsView summaries={callSummaries} clients={clients} />}
             {rightTab === 'chat' && chatPanel}
           </div>
         </div>
@@ -859,8 +989,8 @@ export default function Home() {
       <div className="md:hidden flex flex-col flex-1 overflow-hidden">
         <div className="flex-1 overflow-hidden flex flex-col">
           {activeTab === 'tasks' && tasksPanel}
-          {activeTab === 'daily' && <DailyView />}
-          {activeTab === 'calls' && <CallsView summaries={callSummaries} />}
+          {activeTab === 'daily' && <DailyView clients={clients} />}
+          {activeTab === 'calls' && <CallsView summaries={callSummaries} clients={clients} />}
           {activeTab === 'chat' && chatPanel}
         </div>
 

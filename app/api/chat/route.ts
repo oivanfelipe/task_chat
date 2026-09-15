@@ -23,7 +23,8 @@ function resolveClientId(name: string | null, clients: Array<{ id: string; name:
 
 function getSystemPrompt(
   clients: Array<{ name: string; segment: string | null; services: string[]; status: string }>,
-  callSummaries: Array<{ doc_name: string; summary: string; participants: string | null; meeting_date: string | null }>
+  callSummaries: Array<{ doc_name: string; summary: string; participants: string | null; meeting_date: string | null }>,
+  clientInsights: Array<{ client_id: string; doc_name: string; meeting_date: string | null; key_decisions: string[]; open_items: string[]; context: string | null }>
 ) {
   const today = new Date()
   const todayISO = today.toISOString().split('T')[0]
@@ -46,27 +47,45 @@ function getSystemPrompt(
     )
     .join('\n')
 
-  return `Você é um assistente de gestão de tarefas para Ivan Felipe (marketing de performance — SEO, tráfego pago, funis, ads).
+  // Group insights by client for compact injection
+  const insightsByClient: Record<string, typeof clientInsights> = {}
+  for (const ins of clientInsights) {
+    if (!insightsByClient[ins.client_id]) insightsByClient[ins.client_id] = []
+    insightsByClient[ins.client_id].push(ins)
+  }
+  const insightLines = Object.entries(insightsByClient)
+    .flatMap(([, insights]) =>
+      insights.slice(0, 3).map(ins => {
+        const decisions = ins.key_decisions.length ? `Decisões: ${ins.key_decisions.join('; ')}` : ''
+        const items = ins.open_items.length ? `Pendentes: ${ins.open_items.join('; ')}` : ''
+        return `[${ins.doc_name}${ins.meeting_date ? ` ${ins.meeting_date}` : ''}] ${ins.context || ''} ${decisions} ${items}`.trim()
+      })
+    )
+    .join('\n')
+
+  return `Você é um assistente de gestão de tarefas e reuniões para Ivan Felipe (marketing de performance — SEO, tráfego pago, funis, ads).
 Hoje é ${todayBR} (ISO: ${todayISO}).
 
 CARTEIRA DE CLIENTES ATIVOS:
 ${clientList}
 
-${recentCalls ? `CALLS RECENTES:\n${recentCalls}\n\n` : ''}CRIAÇÃO DE TAREFA — regras obrigatórias:
-- Ao receber uma tarefa, crie IMEDIATAMENTE em uma só resposta (ZERO perguntas de acompanhamento)
-- Infira cliente, prioridade e prazo pelo contexto. Se não houver cliente claro, use null
-- Responda APENAS com JSON (sem texto extra, sem markdown):
+${recentCalls ? `CALLS RECENTES:\n${recentCalls}\n\n` : ''}${insightLines ? `INSIGHTS DE REUNIÃO POR CLIENTE (use para responder perguntas sobre calls):\n${insightLines}\n\n` : ''}AÇÕES DISPONÍVEIS — responda APENAS com JSON quando o usuário pedir uma dessas ações (sem texto extra, sem markdown):
 
+1. CRIAR TAREFA:
 {"action":"create_task","title":"[NomeCliente] Ação objetiva","description":"Detalhes relevantes","priority":"alta|media|baixa","deadline":"YYYY-MM-DD ou null","category":"trabalho|pessoal","client_name":"NomeCliente ou null"}
 
-REGRAS:
-- title: para trabalho com cliente, sempre "[NomeCliente] ação"
-- client_name: use EXATAMENTE o nome da lista de clientes acima, ou null se pessoal/sem cliente
-- priority: "alta" (urgente/prazo curto), "media" (importante sem urgência), "baixa" (backlog)
-- deadline: "hoje" = ${todayISO}, "amanhã" = ${tomorrowISO}, interprete semanas/meses relativos corretamente
-- category: "trabalho" para clientes/marketing, "pessoal" para saúde/família/lazer
+2. CRIAR PAUTA NA DAILY:
+{"action":"create_daily_item","text":"Texto da pauta","date":"YYYY-MM-DD","client_name":"NomeCliente ou null"}
 
-Fora do fluxo de tarefas (perguntas sobre calls, clientes, situação geral): responda normalmente em português, de forma direta e objetiva.`
+REGRAS:
+- create_task: quando o usuário mencionar uma tarefa, to-do, ação, entregável. title sempre "[NomeCliente] ação" para trabalho
+- create_daily_item: quando mencionar pauta, agenda, daily, reunião de amanhã/hoje, colocar na lista
+- client_name: use EXATAMENTE o nome da lista de clientes acima, ou null
+- priority: "alta" (urgente/prazo curto), "media" (importante sem urgência), "baixa" (backlog)
+- deadline: "hoje" = ${todayISO}, "amanhã" = ${tomorrowISO}
+- Crie IMEDIATAMENTE em uma só resposta (ZERO perguntas de acompanhamento)
+
+Fora do fluxo de ações (perguntas sobre calls, clientes, situação geral): responda normalmente em português, de forma direta e objetiva, usando os INSIGHTS DE REUNIÃO disponíveis.`
 }
 
 export async function POST(req: NextRequest) {
@@ -95,20 +114,22 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Nenhuma mensagem recebida' }, { status: 400 })
     }
 
-    const [clientsRes, callsRes] = await Promise.all([
+    const [clientsRes, callsRes, insightsRes] = await Promise.all([
       supabase.from('clients').select('id, name, segment, services, status').order('name'),
       supabase.from('call_summaries').select('doc_name, summary, participants, meeting_date').order('created_at', { ascending: false }).limit(5),
+      supabase.from('client_meeting_insights').select('client_id, doc_name, meeting_date, key_decisions, open_items, context').order('created_at', { ascending: false }).limit(30),
     ])
 
     const clients = clientsRes.data || []
     const callSummaries = callsRes.data || []
+    const clientInsights = insightsRes.data || []
 
     const completion = await groq.chat.completions.create({
       model: 'llama-3.3-70b-versatile',
       temperature: 0.3,
       max_tokens: 600,
       messages: [
-        { role: 'system', content: getSystemPrompt(clients, callSummaries) },
+        { role: 'system', content: getSystemPrompt(clients, callSummaries, clientInsights) },
         ...history,
         { role: 'user', content: userMessage },
       ],
@@ -117,13 +138,27 @@ export async function POST(req: NextRequest) {
     let responseText = completion.choices[0].message.content || ''
 
     let task = null
+    let dailyItem = null
+
     try {
-      const jsonMatch = responseText.match(/\{[\s\S]*"action"\s*:\s*"create_task"[\s\S]*\}/)
+      const jsonMatch = responseText.match(/\{[\s\S]*"action"\s*:\s*"(create_task|create_daily_item)"[\s\S]*\}/)
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0])
-        parsed.client_id = resolveClientId(parsed.client_name ?? null, clients)
-        task = parsed
-        responseText = `✅ Tarefa "${task.title}" criada!`
+
+        if (parsed.action === 'create_task') {
+          parsed.client_id = resolveClientId(parsed.client_name ?? null, clients)
+          task = parsed
+          responseText = `✅ Tarefa "${task.title}" criada!`
+        } else if (parsed.action === 'create_daily_item') {
+          const clientId = resolveClientId(parsed.client_name ?? null, clients)
+          const { data: inserted } = await supabase
+            .from('daily_items')
+            .insert({ date: parsed.date, text: parsed.text, client_id: clientId })
+            .select()
+            .single()
+          dailyItem = inserted
+          responseText = `📋 Pauta "${parsed.text}" adicionada à daily de ${parsed.date}!`
+        }
       }
     } catch { /* normal response */ }
 
@@ -131,6 +166,7 @@ export async function POST(req: NextRequest) {
       message: responseText,
       transcription: audio && audio.size > 0 ? userMessage : null,
       task,
+      daily_item: dailyItem,
     })
   } catch (err) {
     console.error('Erro na API de chat:', err)

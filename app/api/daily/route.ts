@@ -22,10 +22,10 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const { date, text } = await req.json()
+  const { date, text, client_id } = await req.json()
   const { data, error } = await supabase
     .from('daily_items')
-    .insert({ date, text })
+    .insert({ date, text, client_id: client_id || null })
     .select()
     .single()
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
@@ -33,10 +33,18 @@ export async function POST(req: NextRequest) {
 }
 
 export async function PATCH(req: NextRequest) {
-  const { id, done } = await req.json()
+  const body = await req.json()
+  const { id, done, text, client_id } = body
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const updates: Record<string, any> = {}
+  if (done !== undefined) updates.done = done
+  if (text !== undefined) updates.text = text
+  if (client_id !== undefined) updates.client_id = client_id || null
+
   const { data, error } = await supabase
     .from('daily_items')
-    .update({ done })
+    .update(updates)
     .eq('id', id)
     .select()
     .single()
